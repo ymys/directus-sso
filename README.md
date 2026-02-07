@@ -1,4 +1,4 @@
-# Mobile Auth Proxy - Directus Extension
+# Directus SSO - Directus Extension
 
 This extension allows you to use the web and mobile OAuth callback and logout endpoints directly through your Directus domain.
 
@@ -6,7 +6,7 @@ This extension allows you to use the web and mobile OAuth callback and logout en
 
 1. **Build the extension:**
    ```bash
-   cd extensions/endpoints/mobile-auth-proxy
+   cd extensions/endpoints/directus-sso
    npm install
    npm run build
    ```
@@ -17,10 +17,10 @@ This extension allows you to use the web and mobile OAuth callback and logout en
 
 Once installed, the following endpoints will be available on your Directus domain:
 
-- **Health Check:** `GET /mobile-auth-proxy/health`
-- **Mobile/Browser Callback (Keycloak):** `GET /mobile-auth-proxy/mobile-callback`
-- **Mobile/Browser Callback (Google):** `GET /mobile-auth-proxy/google-callback`
-- **Mobile Logout:** `POST /mobile-auth-proxy/mobile-logout`
+- **Health Check:** `GET /sso/health`
+- **Mobile/Browser Callback (Keycloak):** `GET /sso/mobile-callback`
+- **Mobile/Browser Callback (Google):** `GET /sso/google-callback`
+- **Mobile Logout:** `POST /sso/mobile-logout`
 
 ## Configuration
 
@@ -102,7 +102,7 @@ const callbackUrl = `${PROXY_URL}/mobile-callback`;
 ### After (Directus extension):
 ```javascript
 const DIRECTUS_URL = 'http://your-directus-domain.com';
-const callbackUrl = `${DIRECTUS_URL}/mobile-auth-proxy/mobile-callback`;
+const callbackUrl = `${DIRECTUS_URL}/sso/mobile-callback`;
 ```
 
 ### Login Flow:
@@ -117,7 +117,7 @@ const result = await WebBrowser.openAuthSessionAsync(
 
 ### Logout:
 ```javascript
-const response = await fetch(`${DIRECTUS_URL}/mobile-auth-proxy/mobile-logout`, {
+const response = await fetch(`${DIRECTUS_URL}/sso/mobile-logout`, {
   method: 'POST',
   headers: {
     'Authorization': `Bearer ${accessToken}`,
@@ -138,7 +138,7 @@ const response = await fetch(`${DIRECTUS_URL}/mobile-auth-proxy/mobile-logout`, 
 To make changes and test locally:
 
 ```bash
-cd extensions/endpoints/mobile-auth-proxy
+cd extensions/endpoints/directus-sso
 npm run dev
 ```
 
@@ -151,7 +151,7 @@ Update your Keycloak client's redirect URI to use the Directus domain:
 **Valid Redirect URIs:**
 ```
 http://your-directus-domain.com/auth/login/keycloak/callback
-http://your-directus-domain.com/mobile-auth-proxy/mobile-callback
+http://your-directus-domain.com/sso/mobile-callback
 myapp://auth/callback
 ```
 

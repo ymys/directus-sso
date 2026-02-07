@@ -1,5 +1,5 @@
 export default {
-	id: 'mobile-auth-proxy',
+	id: 'sso',
 	handler: (router, { env, logger }) => {
 		const KEYCLOAK_URL = env.KEYCLOAK_URL || 'http://keycloak:8080';
 		const KEYCLOAK_REALM = env.KEYCLOAK_REALM || 'testing';

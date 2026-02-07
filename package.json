@@ -1,5 +1,5 @@
 {
-	"name": "directus-extension-mobile-auth-proxy",
+	"name": "directus-extension-sso",
 	"description": "Mobile OAuth proxy endpoints for Directus + Keycloak + Google",
 	"icon": "smartphone",
 	"version": "1.3.6",
@@ -36,7 +36,7 @@
 		"path": "dist/index.js",
 		"source": "src/index.js",
 		"host": "^11.0.0",
-		"id": "mobile-auth-proxy"
+		"id": "sso"
 	},
 	"scripts": {
 		"build": "directus-extension build",
