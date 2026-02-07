@@ -6,7 +6,7 @@ This extension allows you to use the web and mobile OAuth callback and logout en
 
 1. **Build the extension:**
    ```bash
-   cd extensions/endpoints/directus-sso
+   cd extensions/endpoints/directus-extension-sso
    npm install
    npm run build
    ```
@@ -138,7 +138,7 @@ const response = await fetch(`${DIRECTUS_URL}/sso/mobile-logout`, {
 To make changes and test locally:
 
 ```bash
-cd extensions/endpoints/directus-sso
+cd extensions/endpoints/directus-extension-sso
 npm run dev
 ```
 

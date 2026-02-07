@@ -1,5 +1,5 @@
 {
-	"name": "directus-extension-sso",
+	"name": "@ymys/directus-extension-sso",
 	"description": "Mobile OAuth proxy endpoints for Directus + Keycloak + Google",
 	"icon": "smartphone",
 	"version": "1.3.6",
