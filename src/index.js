@@ -119,6 +119,7 @@ export default {
 
 		// old: jalan Mobile callback endpoint - handles OAuth redirect
 		router.get('/mobile-callback', async (req, res) => {
+			const isBrowser = isBrowserRequest(req);
 			logger.info('📱 Mobile callback received');
 			logger.info('Cookies: ' + JSON.stringify(req.cookies));
 			logger.info('Query: ' + JSON.stringify(req.query));
