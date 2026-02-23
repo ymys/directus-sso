@@ -118,9 +118,10 @@ export default {
 		// Mobile callback endpoint - handles OAuth redirect
 
 		// old: jalan Mobile callback endpoint - handles OAuth redirect
+		// Mobile callback endpoint - handles OAuth redirect
 		router.get('/mobile-callback', async (req, res) => {
-			const isBrowser = isBrowserRequest(req);
-			logger.info('📱 Mobile callback received');
+			const isBrowser = isBrowserRequest(req); // FIXED 1: Define isBrowser
+			logger.info(`${isBrowser ? '🌐' : '📱'} ${isBrowser ? 'Browser' : 'Mobile'} callback received`);
 			logger.info('Cookies: ' + JSON.stringify(req.cookies));
 			logger.info('Query: ' + JSON.stringify(req.query));
 
@@ -131,14 +132,14 @@ export default {
 				if (!sessionToken) {
 					logger.error('❌ No session token found in cookies');
 					return res.send(`
-					<html>
-						<body>
-							<h2>Authentication Failed</h2>
-							<p>No session token found. Please try logging in again.</p>
-							<a href="${PUBLIC_URL}/auth/login/keycloak">Try Again</a>
-						</body>
-					</html>
-				`);
+			<html>
+				<body>
+					<h2>Authentication Failed</h2>
+					<p>No session token found. Please try logging in again.</p>
+					<a href="${PUBLIC_URL}/auth/login/keycloak">Try Again</a>
+				</body>
+			</html>
+		`);
 				}
 
 				logger.info('✅ Session token found: ' + sessionToken.substring(0, 20) + '...');
@@ -186,30 +187,32 @@ export default {
 					return res.redirect(redirectTo);
 				}
 
-				// Build redirect URL with token
-				const redirectUrl = new URL(`${MOBILE_APP_SCHEME}://${MOBILE_APP_CALLBACK_PATH}`);
-				redirectUrl.searchParams.set('access_token', accessToken);
-				redirectUrl.searchParams.set('user_id', userId);
-				redirectUrl.searchParams.set('email', userEmail || '');
+				// FIXED 2: Build redirect URL manually to support custom schemes perfectly
+				// E.g., portalpipq://auth/callback?access_token=...
+				// Note: Ensure your MOBILE_APP_CALLBACK_PATH starts with an extra slash if you want two slashes! 
+				// If MOBILE_APP_CALLBACK_PATH is "/auth/callback", this builds "portalpipq:/auth/callback" which React Native handles strictly like a real URI path.
+				const redirectPath = MOBILE_APP_CALLBACK_PATH.startsWith('/') ? MOBILE_APP_CALLBACK_PATH : `//${MOBILE_APP_CALLBACK_PATH}`;
+				const redirectUrl = `${MOBILE_APP_SCHEME}:${redirectPath}?access_token=${accessToken}&user_id=${userId}&email=${encodeURIComponent(userEmail || '')}`;
 
-				logger.info('🔄 Redirecting to app: ' + redirectUrl.toString());
+				logger.info('🔄 Redirecting to app: ' + redirectUrl);
 
 				// Use HTTP redirect for mobile apps
-				res.redirect(redirectUrl.toString());
+				res.redirect(redirectUrl);
 
 			} catch (error) {
 				logger.error('❌ Error in callback:', error);
 				res.status(500).send(`
-				<html>
-					<body>
-						<h2>Error</h2>
-						<p>${error.message}</p>
-						<a href="${PUBLIC_URL}/auth/login/keycloak">Try Again</a>
-					</body>
-				</html>
-			`);
+		<html>
+			<body>
+				<h2>Error</h2>
+				<p>${error.message}</p>
+				<a href="${PUBLIC_URL}/auth/login/keycloak">Try Again</a>
+			</body>
+		</html>
+	`);
 			}
 		});
+
 
 
 		// Google callback endpoint - handles OAuth redirect for both browser and mobile flows
