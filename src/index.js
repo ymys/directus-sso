@@ -181,7 +181,20 @@ export default {
 					});
 
 					// Check if there's a redirect URL in the query params
-					const redirectTo = req.query.redirect_uri || req.query.redirect || '/';
+					let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
+
+					// Append token to Web redirect URL to bridge the gap for React Native Web
+					try {
+						if (redirectTo.startsWith('http')) {
+							const redirectUrlObj = new URL(redirectTo);
+							redirectUrlObj.searchParams.set('access_token', accessToken);
+							redirectUrlObj.searchParams.set('user_id', userId);
+							redirectUrlObj.searchParams.set('email', userEmail || '');
+							redirectTo = redirectUrlObj.toString();
+						}
+					} catch (e) {
+						logger.error('❌ Failed to parse Web redirect URL: ' + redirectTo);
+					}
 
 					logger.info('🔄 Redirecting browser to: ' + redirectTo);
 					return res.redirect(redirectTo);
@@ -293,7 +306,21 @@ export default {
 					});
 
 					// Check if there's a redirect URL in the query params
-					const redirectTo = req.query.redirect_uri || req.query.redirect || '/';
+					let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
+
+					// Append token to Web redirect URL to bridge the gap for React Native Web
+					try {
+						if (redirectTo.startsWith('http')) {
+							const redirectUrlObj = new URL(redirectTo);
+							redirectUrlObj.searchParams.set('access_token', accessToken);
+							redirectUrlObj.searchParams.set('user_id', userId);
+							redirectUrlObj.searchParams.set('email', userEmail || '');
+							redirectUrlObj.searchParams.set('provider', 'google');
+							redirectTo = redirectUrlObj.toString();
+						}
+					} catch (e) {
+						logger.error('❌ Failed to parse Web redirect URL: ' + redirectTo);
+					}
 
 					logger.info('🔄 Redirecting browser to: ' + redirectTo);
 
