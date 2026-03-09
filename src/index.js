@@ -13,6 +13,7 @@ export default {
 		const COOKIE_DOMAIN = env.COOKIE_DOMAIN || null;
 		const COOKIE_SECURE = env.COOKIE_SECURE !== 'false';
 		const COOKIE_SAME_SITE = env.COOKIE_SAME_SITE || 'lax';
+		const SESSION_COOKIE_NAME = env.SESSION_COOKIE_NAME || 'directus_session_token';
 
 		logger.info('🚀 Mobile Auth Proxy Extension loaded');
 		logger.info('🔐 Keycloak URL: ' + KEYCLOAK_URL);
@@ -127,7 +128,7 @@ export default {
 
 			try {
 				// Get session cookie from the request
-				const sessionToken = req.cookies.directus_session_token;
+				const sessionToken = req.cookies[SESSION_COOKIE_NAME];
 
 				if (!sessionToken) {
 					logger.error('❌ No session token found in cookies');
@@ -147,7 +148,7 @@ export default {
 				// Get user info using the session token
 				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
 					headers: {
-						'Cookie': `directus_session_token=${sessionToken}`,
+						'Cookie': `${SESSION_COOKIE_NAME}=${sessionToken}`,
 					},
 				});
 
@@ -171,7 +172,7 @@ export default {
 					logger.info('🌐 Browser request detected - maintaining session');
 
 					// Set session cookie (explicitly to ensure domain/secure settings)
-					res.cookie('directus_session_token', sessionToken, {
+					res.cookie(SESSION_COOKIE_NAME, sessionToken, {
 						httpOnly: true,
 						secure: COOKIE_SECURE,
 						domain: COOKIE_DOMAIN,
@@ -237,7 +238,7 @@ export default {
 
 			try {
 				// Get session cookie from the request
-				const sessionToken = req.cookies.directus_session_token;
+				const sessionToken = req.cookies[SESSION_COOKIE_NAME];
 
 				if (!sessionToken) {
 					logger.error('❌ No session token found in cookies');
@@ -271,7 +272,7 @@ export default {
 				// Get user info using the session token
 				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
 					headers: {
-						'Cookie': `directus_session_token=${sessionToken}`,
+						'Cookie': `${SESSION_COOKIE_NAME}=${sessionToken}`,
 					},
 				});
 
@@ -296,7 +297,7 @@ export default {
 					logger.info('🌐 Browser request detected - maintaining session');
 
 					// Set session cookie (explicitly to ensure domain/secure settings)
-					res.cookie('directus_session_token', sessionToken, {
+					res.cookie(SESSION_COOKIE_NAME, sessionToken, {
 						httpOnly: true,
 						secure: COOKIE_SECURE,
 						domain: COOKIE_DOMAIN,
