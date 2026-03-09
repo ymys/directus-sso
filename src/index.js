@@ -1,3 +1,7 @@
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { version } = require('../package.json');
+
 export default {
 	id: 'sso',
 	handler: (router, { env, logger }) => {
@@ -19,6 +23,8 @@ export default {
 		logger.info('🚀 Mobile Auth Proxy Extension loaded');
 		logger.info('🔐 Keycloak URL: ' + KEYCLOAK_URL);
 		logger.info('🌐 Keycloak Realm: ' + KEYCLOAK_REALM);
+		logger.info('📡 Public URL: ' + PUBLIC_URL);
+		logger.info('🍪 Session Cookie Name: ' + SESSION_COOKIE_NAME);
 
 		logger.info('📱 Mobile App Scheme: ' + MOBILE_APP_SCHEME + '://' + MOBILE_APP_CALLBACK_PATH);
 		logger.info('🔵 Google OAuth enabled');
@@ -98,7 +104,7 @@ export default {
 
 		// Health check
 		router.get('/health', (req, res) => {
-			res.json({ status: 'ok', service: 'directus-mobile-auth-proxy' });
+			res.json({ status: 'ok', service: 'directus-extension-sso', version });
 		});
 
 		// Helper function to detect if request is from browser or mobile app
@@ -152,15 +158,18 @@ export default {
 
 				logger.info('✅ Session token found, length: ' + sessionToken.length);
 
-				// Get user info using the session token – ALWAYS use CORE_COOKIE_NAME internally
+				// PASSTHROUGH FIX: Always send ALL cookies to the internal fetch.
+				// This allows Directus core to use its own SESSION_COOKIE_NAME logic.
 				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
 					headers: {
-						'Cookie': `${CORE_COOKIE_NAME}=${sessionToken}`,
+						'Cookie': req.headers.cookie,
 					},
 				});
 
 				if (!meResponse.ok) {
-					throw new Error('Failed to get user info: ' + await meResponse.text());
+					const errorText = await meResponse.text();
+					logger.error(`❌ Internal /users/me failed (${meResponse.status}): ${errorText}`);
+					throw new Error('Failed to get user info: ' + errorText);
 				}
 
 				const userData = await meResponse.json();
@@ -287,15 +296,17 @@ export default {
 
 				logger.info('✅ Session token found (Google), length: ' + sessionToken.length);
 
-				// Get user info using the session token – ALWAYS use CORE_COOKIE_NAME internally
+				// PASSTHROUGH FIX: Always send ALL cookies to the internal fetch.
 				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
 					headers: {
-						'Cookie': `${CORE_COOKIE_NAME}=${sessionToken}`,
+						'Cookie': req.headers.cookie,
 					},
 				});
 
 				if (!meResponse.ok) {
-					throw new Error('Failed to get user info: ' + await meResponse.text());
+					const errorText = await meResponse.text();
+					logger.error(`❌ Internal /users/me (Google) failed (${meResponse.status}): ${errorText}`);
+					throw new Error('Failed to get user info: ' + errorText);
 				}
 
 				const userData = await meResponse.json();
