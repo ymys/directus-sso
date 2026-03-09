@@ -14,6 +14,7 @@ export default {
 		const COOKIE_SECURE = env.COOKIE_SECURE !== 'false';
 		const COOKIE_SAME_SITE = env.COOKIE_SAME_SITE || 'lax';
 		const SESSION_COOKIE_NAME = env.SESSION_COOKIE_NAME || 'directus_session_token';
+		const CORE_COOKIE_NAME = 'directus_session_token'; // Core always uses this name internally
 
 		logger.info('🚀 Mobile Auth Proxy Extension loaded');
 		logger.info('🔐 Keycloak URL: ' + KEYCLOAK_URL);
@@ -127,8 +128,14 @@ export default {
 			logger.info('Query: ' + JSON.stringify(req.query));
 
 			try {
-				// Get session cookie from the request
-				const sessionToken = req.cookies[SESSION_COOKIE_NAME];
+				// Fallback mechanism: Try to read core cookie if instance cookie is missing
+				let sessionToken = req.cookies[SESSION_COOKIE_NAME];
+				if (!sessionToken && SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+					sessionToken = req.cookies[CORE_COOKIE_NAME];
+					if (sessionToken) {
+						logger.info(`🔄 Bridging core token to ${SESSION_COOKIE_NAME}`);
+					}
+				}
 
 				if (!sessionToken) {
 					logger.error('❌ No session token found in cookies');
@@ -143,12 +150,12 @@ export default {
 		`);
 				}
 
-				logger.info('✅ Session token found: ' + sessionToken.substring(0, 20) + '...');
+				logger.info('✅ Session token found, length: ' + sessionToken.length);
 
-				// Get user info using the session token
+				// Get user info using the session token – ALWAYS use CORE_COOKIE_NAME internally
 				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
 					headers: {
-						'Cookie': `${SESSION_COOKIE_NAME}=${sessionToken}`,
+						'Cookie': `${CORE_COOKIE_NAME}=${sessionToken}`,
 					},
 				});
 
@@ -180,6 +187,11 @@ export default {
 						maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
 						path: '/',
 					});
+
+					// CRITICAL: If we bridged the name, clear the core cookie to avoid conflicts
+					if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+						res.cookie(CORE_COOKIE_NAME, '', { maxAge: 0, path: '/' });
+					}
 
 					// Check if there's a redirect URL in the query params
 					let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
@@ -237,11 +249,17 @@ export default {
 			logger.info('Query: ' + JSON.stringify(req.query));
 
 			try {
-				// Get session cookie from the request
-				const sessionToken = req.cookies[SESSION_COOKIE_NAME];
+				// Fallback mechanism: Try to read core cookie if instance cookie is missing
+				let sessionToken = req.cookies[SESSION_COOKIE_NAME];
+				if (!sessionToken && SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+					sessionToken = req.cookies[CORE_COOKIE_NAME];
+					if (sessionToken) {
+						logger.info(`🔄 Bridging core token to ${SESSION_COOKIE_NAME} (Google)`);
+					}
+				}
 
 				if (!sessionToken) {
-					logger.error('❌ No session token found in cookies');
+					logger.error('❌ No session token found in cookies (Google)');
 					return res.send(`
 						<html>
 							<head>
@@ -267,12 +285,12 @@ export default {
 					`);
 				}
 
-				logger.info('✅ Session token found: ' + sessionToken.substring(0, 20) + '...');
+				logger.info('✅ Session token found (Google), length: ' + sessionToken.length);
 
-				// Get user info using the session token
+				// Get user info using the session token – ALWAYS use CORE_COOKIE_NAME internally
 				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
 					headers: {
-						'Cookie': `${SESSION_COOKIE_NAME}=${sessionToken}`,
+						'Cookie': `${CORE_COOKIE_NAME}=${sessionToken}`,
 					},
 				});
 
@@ -305,6 +323,11 @@ export default {
 						maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
 						path: '/',
 					});
+
+					// CRITICAL: If we bridged the name, clear the core cookie to avoid conflicts
+					if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+						res.cookie(CORE_COOKIE_NAME, '', { maxAge: 0, path: '/' });
+					}
 
 					// Check if there's a redirect URL in the query params
 					let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
