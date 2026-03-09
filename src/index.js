@@ -108,8 +108,18 @@ export default {
 		});
 
 		// Helper function to detect if request is from browser or mobile app
-		return isBrowser;
-	}
+		function isBrowserRequest(req) {
+			// Check explicit query parameter first
+			if (req.query.type === 'browser') return true;
+			if (req.query.type === 'mobile') return false;
+
+			// Check User-Agent for common browser patterns
+			const userAgent = req.headers['user-agent'] || '';
+			const isBrowser = /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(userAgent) &&
+				!/Mobile.*App|ReactNative|Expo/i.test(userAgent);
+
+			return isBrowser;
+		}
 
 		/**
 		 * PASSTHROUGH FIX 2.0: Cookie Brute-Force (v1.5.3)
@@ -118,146 +128,235 @@ export default {
 		 * on the same domain, and we don't know which one Directus will pick.
 		 */
 		async function tryAllCookies(req, cookieName) {
-	const rawCookie = req.headers.cookie;
-	if (!rawCookie) return null;
+			const rawCookie = req.headers.cookie;
+			if (!rawCookie) return null;
 
-	// Extract all values for the specified cookie name
-	// e.g. "directus_session_token=token1; other=123; directus_session_token=token2"
-	const cookieValues = rawCookie.split(';')
-		.map(c => c.trim())
-		.filter(c => c.startsWith(`${cookieName}=`))
-		.map(c => c.substring(cookieName.length + 1));
+			// Extract all values for the specified cookie name
+			// e.g. "directus_session_token=token1; other=123; directus_session_token=token2"
+			const cookieValues = rawCookie.split(';')
+				.map(c => c.trim())
+				.filter(c => c.startsWith(`${cookieName}=`))
+				.map(c => c.substring(cookieName.length + 1));
 
-	if (cookieValues.length === 0) return null;
+			if (cookieValues.length === 0) return null;
 
-	logger.info(`🔍 [${cookieName}] Found ${cookieValues.length} possible tokens. Trying them...`);
+			logger.info(`🔍 [${cookieName}] Found ${cookieValues.length} possible tokens. Trying them...`);
 
-	for (let i = 0; i < cookieValues.length; i++) {
-		const token = cookieValues[i];
-		try {
-			const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-				headers: {
-					'Cookie': `${cookieName}=${token}`,
-				},
-			});
+			for (let i = 0; i < cookieValues.length; i++) {
+				const token = cookieValues[i];
+				try {
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+						headers: {
+							'Cookie': `${cookieName}=${token}`,
+						},
+					});
 
-			if (meResponse.ok) {
-				const userData = await meResponse.json();
-				logger.info(`✅ [${cookieName}] Token #${i + 1} succeeded for ${userData.data.email}`);
-				return { token, userData: userData.data };
-			} else {
-				logger.info(`❌ [${cookieName}] Token #${i + 1} failed (${meResponse.status})`);
+					if (meResponse.ok) {
+						const userData = await meResponse.json();
+						logger.info(`✅ [${cookieName}] Token #${i + 1} succeeded for ${userData.data.email}`);
+						return { token, userData: userData.data };
+					} else {
+						logger.info(`❌ [${cookieName}] Token #${i + 1} failed (${meResponse.status})`);
+					}
+				} catch (err) {
+					logger.error(`⚠️ [${cookieName}] Error trying token #${i + 1}: ${err.message}`);
+				}
 			}
-		} catch (err) {
-			logger.error(`⚠️ [${cookieName}] Error trying token #${i + 1}: ${err.message}`);
-		}
-	}
 
-	return null;
-}
-
-
-
-// Mobile callback endpoint - handles OAuth redirect
-
-// old: jalan Mobile callback endpoint - handles OAuth redirect
-// Mobile callback endpoint - handles OAuth redirect
-router.get('/mobile-callback', async (req, res) => {
-	const isBrowser = isBrowserRequest(req); // FIXED 1: Define isBrowser
-	logger.info(`${isBrowser ? '🌐' : '📱'} ${isBrowser ? 'Browser' : 'Mobile'} callback received`);
-	logger.info('Cookies: ' + JSON.stringify(req.cookies));
-	logger.info('Query: ' + JSON.stringify(req.query));
-
-	try {
-		// 1. First try the specific SESSION_COOKIE_NAME if it's different
-		let authResult = null;
-		if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-			authResult = await tryAllCookies(req, SESSION_COOKIE_NAME);
+			return null;
 		}
 
-		// 2. Fallback to the CORE_COOKIE_NAME
-		if (!authResult) {
-			authResult = await tryAllCookies(req, CORE_COOKIE_NAME);
+		/**
+		 * MEGA BRUTE-FORCE (v1.5.4)
+		 * Tries every JWT-looking value found in the cookie header.
+		 * If we can't find it by name, maybe we find it by content!
+		 */
+		async function tryEveryPossibleJwt(req) {
+			const rawCookie = req.headers.cookie;
+			if (!rawCookie) return null;
+
+			// Extract everything that looks like a JWT (starts with eyJ and is long)
+			const candidates = rawCookie.split(';')
+				.map(c => c.trim())
+				.map(c => {
+					const parts = c.split('=');
+					return parts.length > 1 ? parts[1] : null;
+				})
+				.filter(v => v && v.startsWith('eyJ') && v.length > 50);
+
+			if (candidates.length === 0) return null;
+
+			logger.info(`🔍 [MEGA] Found ${candidates.length} potential JWTs in cookies. Trying them...`);
+
+			for (let i = 0; i < candidates.length; i++) {
+				const token = candidates[i];
+				try {
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+						headers: {
+							'Authorization': `Bearer ${token}`
+						},
+					});
+
+					if (meResponse.ok) {
+						const userData = await meResponse.json();
+						logger.info(`✅ [MEGA] Token #${i + 1} succeeded for ${userData.data.email}`);
+						return { token, userData: userData.data };
+					}
+				} catch (err) { }
+			}
+
+			return null;
 		}
 
-		if (!authResult) {
-			logger.error('❌ No valid session token found in any cookies');
-			return res.send(`
+		/**
+		 * REFRESH FALLBACK (v1.5.4)
+		 * If we have a refresh token, try to exchange it for a new session.
+		 */
+		async function tryRefreshToken(req) {
+			const refreshToken = req.cookies['directus_refresh_token'];
+			if (!refreshToken) return null;
+
+			logger.info('🔄 [REFRESH] Attempting to use directus_refresh_token...');
+			try {
+				const refreshResponse = await fetch(`${PUBLIC_URL}/auth/refresh`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ refresh_token: refreshToken })
+				});
+
+				if (refreshResponse.ok) {
+					const data = await refreshResponse.json();
+					const newToken = data.data.access_token;
+					logger.info('✅ [REFRESH] Successfully refreshed session');
+
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+						headers: { 'Authorization': `Bearer ${newToken}` }
+					});
+
+					if (meResponse.ok) {
+						const userData = await meResponse.json();
+						return { token: newToken, userData: userData.data };
+					}
+				}
+			} catch (err) {
+				logger.error('❌ [REFRESH] Failed: ' + err.message);
+			}
+			return null;
+		}
+
+		// Mobile callback endpoint - handles OAuth redirect
+		router.get('/mobile-callback', async (req, res) => {
+			const isBrowser = isBrowserRequest(req);
+			logger.info(`${isBrowser ? '🌐' : '📱'} ${isBrowser ? 'Browser' : 'Mobile'} callback received`);
+			logger.info('Host Header: ' + req.headers.host);
+			logger.info('Cookies Header: ' + req.headers.cookie);
+			logger.info('Parsed Cookies: ' + JSON.stringify(req.cookies));
+			logger.info('Query: ' + JSON.stringify(req.query));
+
+			try {
+				// 1. Try by name (v1.5.3 brute-force)
+				let authResult = null;
+				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+					authResult = await tryAllCookies(req, SESSION_COOKIE_NAME);
+				}
+				if (!authResult) {
+					authResult = await tryAllCookies(req, CORE_COOKIE_NAME);
+				}
+
+				// 2. Try Mega Brute-Force (v1.5.4 - any JWT in the header)
+				if (!authResult) {
+					authResult = await tryEveryPossibleJwt(req);
+				}
+
+				// 3. Try Refresh Token fallback (v1.5.4)
+				if (!authResult) {
+					authResult = await tryRefreshToken(req);
+				}
+
+				if (!authResult) {
+					logger.error('❌ No valid session or refresh token found in any cookies');
+					return res.send(`
 						<html>
 							<body>
 								<h2>Authentication Failed</h2>
 								<p>No valid session found. Please try logging in again.</p>
-								<a href="${PUBLIC_URL}/auth/login/keycloak">Try Again</a>
+								<div style="font-size: 11px; color: #999; margin-top: 20px; text-align: left;">
+									<strong>Debug Info (v1.5.4):</strong><br>
+									Instance: ${SESSION_COOKIE_NAME}<br>
+									URL: ${PUBLIC_URL}<br>
+									Host: ${req.headers.host}
+								</div>
+								<a href="${PUBLIC_URL}/auth/login/keycloak" style="display: inline-block; margin-top: 20px;">Try Again</a>
 							</body>
 						</html>
 					`);
-		}
-
-		const { token: sessionToken, userData } = authResult;
-		const userId = userData.id;
-		const userEmail = userData.email;
-
-		logger.info('👤 User authenticated: ' + userId + ', ' + userEmail);
-
-		// The session token is actually a valid JWT access token
-		const accessToken = sessionToken;
-
-		logger.info('🎫 Using session token as access token');
-
-		// Handle browser requests
-		if (isBrowser) {
-			logger.info('🌐 Browser request detected - maintaining session');
-
-			// Set session cookie (explicitly to ensure domain/secure settings)
-			res.cookie(SESSION_COOKIE_NAME, sessionToken, {
-				httpOnly: true,
-				secure: COOKIE_SECURE,
-				domain: COOKIE_DOMAIN,
-				sameSite: COOKIE_SAME_SITE,
-				maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-				path: '/',
-			});
-
-			// CRITICAL: If we bridged the name, clear the core cookie to avoid conflicts
-			if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-				res.cookie(CORE_COOKIE_NAME, '', { maxAge: 0, path: '/' });
-			}
-
-			// Check if there's a redirect URL in the query params
-			let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
-
-			// Append token to Web redirect URL to bridge the gap for React Native Web
-			try {
-				if (redirectTo.startsWith('http')) {
-					const redirectUrlObj = new URL(redirectTo);
-					redirectUrlObj.searchParams.set('access_token', accessToken);
-					redirectUrlObj.searchParams.set('user_id', userId);
-					redirectUrlObj.searchParams.set('email', userEmail || '');
-					redirectTo = redirectUrlObj.toString();
 				}
-			} catch (e) {
-				logger.error('❌ Failed to parse Web redirect URL: ' + redirectTo);
-			}
 
-			logger.info('🔄 Redirecting browser to: ' + redirectTo);
-			return res.redirect(redirectTo);
-		}
+				const { token: sessionToken, userData } = authResult;
+				const userId = userData.id;
+				const userEmail = userData.email;
 
-		// FIXED 2: Build redirect URL manually to support custom schemes perfectly
-		// E.g., portalpipq://auth/callback?access_token=...
-		// Note: Ensure your MOBILE_APP_CALLBACK_PATH starts with an extra slash if you want two slashes! 
-		// If MOBILE_APP_CALLBACK_PATH is "/auth/callback", this builds "portalpipq:/auth/callback" which React Native handles strictly like a real URI path.
-		const redirectPath = MOBILE_APP_CALLBACK_PATH.startsWith('/') ? MOBILE_APP_CALLBACK_PATH : `//${MOBILE_APP_CALLBACK_PATH}`;
-		const redirectUrl = `${MOBILE_APP_SCHEME}:${redirectPath}?access_token=${accessToken}&user_id=${userId}&email=${encodeURIComponent(userEmail || '')}`;
+				logger.info('👤 User authenticated: ' + userId + ', ' + userEmail);
 
-		logger.info('🔄 Redirecting to app: ' + redirectUrl);
+				// The session token is actually a valid JWT access token
+				const accessToken = sessionToken;
 
-		// Use HTTP redirect for mobile apps
-		res.redirect(redirectUrl);
+				logger.info('🎫 Using session token as access token');
 
-	} catch (error) {
-		logger.error('❌ Error in callback:', error);
-		res.status(500).send(`
+				// Handle browser requests
+				if (isBrowser) {
+					logger.info('🌐 Browser request detected - maintaining session');
+
+					// Set session cookie (explicitly to ensure domain/secure settings)
+					res.cookie(SESSION_COOKIE_NAME, sessionToken, {
+						httpOnly: true,
+						secure: COOKIE_SECURE,
+						domain: COOKIE_DOMAIN,
+						sameSite: COOKIE_SAME_SITE,
+						maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+						path: '/',
+					});
+
+					// CRITICAL: If we bridged the name, clear the core cookie to avoid conflicts
+					if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+						res.cookie(CORE_COOKIE_NAME, '', { maxAge: 0, path: '/' });
+					}
+
+					// Check if there's a redirect URL in the query params
+					let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
+
+					// Append token to Web redirect URL to bridge the gap for React Native Web
+					try {
+						if (redirectTo.startsWith('http')) {
+							const redirectUrlObj = new URL(redirectTo);
+							redirectUrlObj.searchParams.set('access_token', accessToken);
+							redirectUrlObj.searchParams.set('user_id', userId);
+							redirectUrlObj.searchParams.set('email', userEmail || '');
+							redirectTo = redirectUrlObj.toString();
+						}
+					} catch (e) {
+						logger.error('❌ Failed to parse Web redirect URL: ' + redirectTo);
+					}
+
+					logger.info('🔄 Redirecting browser to: ' + redirectTo);
+					return res.redirect(redirectTo);
+				}
+
+				// FIXED 2: Build redirect URL manually to support custom schemes perfectly
+				// E.g., portalpipq://auth/callback?access_token=...
+				// Note: Ensure your MOBILE_APP_CALLBACK_PATH starts with an extra slash if you want two slashes! 
+				// If MOBILE_APP_CALLBACK_PATH is "/auth/callback", this builds "portalpipq:/auth/callback" which React Native handles strictly like a real URI path.
+				const redirectPath = MOBILE_APP_CALLBACK_PATH.startsWith('/') ? MOBILE_APP_CALLBACK_PATH : `//${MOBILE_APP_CALLBACK_PATH}`;
+				const redirectUrl = `${MOBILE_APP_SCHEME}:${redirectPath}?access_token=${accessToken}&user_id=${userId}&email=${encodeURIComponent(userEmail || '')}`;
+
+				logger.info('🔄 Redirecting to app: ' + redirectUrl);
+
+				// Use HTTP redirect for mobile apps
+				res.redirect(redirectUrl);
+
+			} catch (error) {
+				logger.error('❌ Error in callback:', error);
+				res.status(500).send(`
 		<html>
 			<body>
 				<h2>Error</h2>
@@ -266,33 +365,41 @@ router.get('/mobile-callback', async (req, res) => {
 			</body>
 		</html>
 	`);
-	}
-});
+			}
+		});
 
 
 
-// Google callback endpoint - handles OAuth redirect for both browser and mobile flows
-router.get('/google-callback', async (req, res) => {
-	const isBrowser = isBrowserRequest(req);
-	logger.info(`${isBrowser ? '🌐' : '📱'} ${isBrowser ? 'Browser' : 'Mobile'} Google callback received`);
-	logger.info('Cookies: ' + JSON.stringify(req.cookies));
-	logger.info('Query: ' + JSON.stringify(req.query));
+		// Google callback endpoint - handles OAuth redirect for both browser and mobile flows
+		router.get('/google-callback', async (req, res) => {
+			const isBrowser = isBrowserRequest(req);
+			logger.info(`${isBrowser ? '🌐' : '📱'} ${isBrowser ? 'Browser' : 'Mobile'} Google callback received`);
+			logger.info('Cookies: ' + JSON.stringify(req.cookies));
+			logger.info('Query: ' + JSON.stringify(req.query));
 
-	try {
-		// 1. First try the specific SESSION_COOKIE_NAME if it's different
-		let authResult = null;
-		if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-			authResult = await tryAllCookies(req, SESSION_COOKIE_NAME);
-		}
+			try {
+				// 1. Try by name (v1.5.3 brute-force)
+				let authResult = null;
+				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+					authResult = await tryAllCookies(req, SESSION_COOKIE_NAME);
+				}
+				if (!authResult) {
+					authResult = await tryAllCookies(req, CORE_COOKIE_NAME);
+				}
 
-		// 2. Fallback to the CORE_COOKIE_NAME
-		if (!authResult) {
-			authResult = await tryAllCookies(req, CORE_COOKIE_NAME);
-		}
+				// 2. Try Mega Brute-Force (v1.5.4 - any JWT in the header)
+				if (!authResult) {
+					authResult = await tryEveryPossibleJwt(req);
+				}
 
-		if (!authResult) {
-			logger.error('❌ No valid session token found in any cookies (Google)');
-			return res.send(`
+				// 3. Try Refresh Token fallback (v1.5.4)
+				if (!authResult) {
+					authResult = await tryRefreshToken(req);
+				}
+
+				if (!authResult) {
+					logger.error('❌ No valid session or refresh token found in any cookies (Google)');
+					return res.send(`
 						<html>
 							<head>
 								<title>Authentication Failed</title>
@@ -302,72 +409,74 @@ router.get('/google-callback', async (req, res) => {
 									.container { max-width: 500px; margin: 0 auto; background: white; 
 									           padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
 									h2 { color: #e74c3c; }
-									a { display: inline-block; margin-top: 20px; padding: 10px 20px; 
-									    background: #4285f4; color: white; text-decoration: none; border-radius: 4px; }
-									a:hover { background: #357ae8; }
+									.debug { font-size: 11px; color: #999; margin-top: 20px; text-align: left; }
 								</style>
 							</head>
 							<body>
 								<div class="container">
 									<h2>Authentication Failed</h2>
 									<p>No valid session found. Please close this and try logging in again.</p>
+									<div class="debug">
+										<strong>Debug Info (v1.5.4):</strong><br>
+										Instance: ${SESSION_COOKIE_NAME} | Google
+									</div>
 								</div>
 							</body>
 						</html>
 					`);
-		}
-
-		const { token: sessionToken, userData } = authResult;
-		const userId = userData.id;
-		const userEmail = userData.email;
-		const userName = userData.first_name || userData.email;
-
-		logger.info('👤 User authenticated via Google: ' + userId + ', ' + userEmail);
-
-		// The session token is actually a valid JWT access token
-		const accessToken = sessionToken;
-
-		logger.info('🎫 Using session token as access token');
-
-		// Handle browser requests
-		if (isBrowser) {
-			logger.info('🌐 Browser request detected - maintaining session');
-
-			// Set session cookie (explicitly to ensure domain/secure settings)
-			res.cookie(SESSION_COOKIE_NAME, sessionToken, {
-				httpOnly: true,
-				secure: COOKIE_SECURE,
-				domain: COOKIE_DOMAIN,
-				sameSite: COOKIE_SAME_SITE,
-				maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-				path: '/',
-			});
-
-			// CRITICAL: If we bridged the name, clear the core cookie to avoid conflicts
-			if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-				res.cookie(CORE_COOKIE_NAME, '', { maxAge: 0, path: '/' });
-			}
-
-			// Check if there's a redirect URL in the query params
-			let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
-
-			// Append token to Web redirect URL to bridge the gap for React Native Web
-			try {
-				if (redirectTo.startsWith('http')) {
-					const redirectUrlObj = new URL(redirectTo);
-					redirectUrlObj.searchParams.set('access_token', accessToken);
-					redirectUrlObj.searchParams.set('user_id', userId);
-					redirectUrlObj.searchParams.set('email', userEmail || '');
-					redirectUrlObj.searchParams.set('provider', 'google');
-					redirectTo = redirectUrlObj.toString();
 				}
-			} catch (e) {
-				logger.error('❌ Failed to parse Web redirect URL: ' + redirectTo);
-			}
 
-			logger.info('🔄 Redirecting browser to: ' + redirectTo);
+				const { token: sessionToken, userData } = authResult;
+				const userId = userData.id;
+				const userEmail = userData.email;
+				const userName = userData.first_name || userData.email;
 
-			return res.send(`
+				logger.info('👤 User authenticated via Google: ' + userId + ', ' + userEmail);
+
+				// The session token is actually a valid JWT access token
+				const accessToken = sessionToken;
+
+				logger.info('🎫 Using session token as access token');
+
+				// Handle browser requests
+				if (isBrowser) {
+					logger.info('🌐 Browser request detected - maintaining session');
+
+					// Set session cookie (explicitly to ensure domain/secure settings)
+					res.cookie(SESSION_COOKIE_NAME, sessionToken, {
+						httpOnly: true,
+						secure: COOKIE_SECURE,
+						domain: COOKIE_DOMAIN,
+						sameSite: COOKIE_SAME_SITE,
+						maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+						path: '/',
+					});
+
+					// CRITICAL: If we bridged the name, clear the core cookie to avoid conflicts
+					if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+						res.cookie(CORE_COOKIE_NAME, '', { maxAge: 0, path: '/' });
+					}
+
+					// Check if there's a redirect URL in the query params
+					let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
+
+					// Append token to Web redirect URL to bridge the gap for React Native Web
+					try {
+						if (redirectTo.startsWith('http')) {
+							const redirectUrlObj = new URL(redirectTo);
+							redirectUrlObj.searchParams.set('access_token', accessToken);
+							redirectUrlObj.searchParams.set('user_id', userId);
+							redirectUrlObj.searchParams.set('email', userEmail || '');
+							redirectUrlObj.searchParams.set('provider', 'google');
+							redirectTo = redirectUrlObj.toString();
+						}
+					} catch (e) {
+						logger.error('❌ Failed to parse Web redirect URL: ' + redirectTo);
+					}
+
+					logger.info('🔄 Redirecting browser to: ' + redirectTo);
+
+					return res.send(`
 						<html>
 							<head>
 								<title>Login Successful</title>
@@ -404,26 +513,26 @@ router.get('/google-callback', async (req, res) => {
 							</body>
 						</html>
 					`);
-		}
+				}
 
-		// Handle mobile app requests
-		logger.info('📱 Mobile app request - redirecting with token');
+				// Handle mobile app requests
+				logger.info('📱 Mobile app request - redirecting with token');
 
-		// Build redirect URL with token for Google callback
-		const redirectUrl = new URL(`${MOBILE_APP_SCHEME}://${GOOGLE_CALLBACK_PATH}`);
-		redirectUrl.searchParams.set('access_token', accessToken);
-		redirectUrl.searchParams.set('user_id', userId);
-		redirectUrl.searchParams.set('email', userEmail || '');
-		redirectUrl.searchParams.set('provider', 'google');
+				// Build redirect URL with token for Google callback
+				const redirectUrl = new URL(`${MOBILE_APP_SCHEME}://${GOOGLE_CALLBACK_PATH}`);
+				redirectUrl.searchParams.set('access_token', accessToken);
+				redirectUrl.searchParams.set('user_id', userId);
+				redirectUrl.searchParams.set('email', userEmail || '');
+				redirectUrl.searchParams.set('provider', 'google');
 
-		logger.info('🔄 Redirecting to app (Google): ' + redirectUrl.toString());
+				logger.info('🔄 Redirecting to app (Google): ' + redirectUrl.toString());
 
-		// Use HTTP redirect for mobile apps
-		res.redirect(redirectUrl.toString());
+				// Use HTTP redirect for mobile apps
+				res.redirect(redirectUrl.toString());
 
-	} catch (error) {
-		logger.error('❌ Error in Google callback:', error);
-		res.status(500).send(`
+			} catch (error) {
+				logger.error('❌ Error in Google callback:', error);
+				res.status(500).send(`
 					<html>
 						<head>
 							<title>Error</title>
@@ -452,112 +561,112 @@ router.get('/google-callback', async (req, res) => {
 						</body>
 					</html>
 				`);
-	}
-});
-
-// Mobile logout endpoint - logs out from Directus and Keycloak
-router.post('/mobile-logout', async (req, res) => {
-	logger.info('🚪 Logout request received');
-
-	try {
-		const authHeader = req.headers.authorization;
-		const token = authHeader?.replace('Bearer ', '');
-
-		if (!token) {
-			return res.status(400).json({
-				error: 'No token provided',
-				message: 'Authorization header with Bearer token is required'
-			});
-		}
-
-		logger.info('🎫 Token received: ' + token.substring(0, 20) + '...');
-
-		let userEmail = null;
-
-		// 1. Get user info from Directus to get email
-		try {
-			const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-				headers: {
-					'Authorization': `Bearer ${token}`,
-				},
-			});
-
-			if (meResponse.ok) {
-				const userData = await meResponse.json();
-				userEmail = userData.data.email;
-				logger.info('👤 User email: ' + userEmail);
 			}
-		} catch (error) {
-			logger.error('⚠️ Error getting user info: ' + error.message);
-		}
+		});
 
-		// 2. Logout from Directus
-		try {
-			const directusLogoutResponse = await fetch(`${PUBLIC_URL}/auth/logout`, {
-				method: 'POST',
-				headers: {
-					'Authorization': `Bearer ${token}`,
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					refresh_token: token,
-				}),
-			});
+		// Mobile logout endpoint - logs out from Directus and Keycloak
+		router.post('/mobile-logout', async (req, res) => {
+			logger.info('🚪 Logout request received');
 
-			if (directusLogoutResponse.ok) {
-				logger.info('✅ Directus session invalidated');
-			} else {
-				logger.info('⚠️ Directus logout response: ' + directusLogoutResponse.status);
-			}
-		} catch (error) {
-			logger.error('⚠️ Error logging out from Directus: ' + error.message);
-		}
-
-		// 3. Logout from Keycloak using Admin API
-		if (userEmail) {
 			try {
-				logger.info('🔐 Getting Keycloak admin token...');
-				const adminToken = await getKeycloakAdminToken();
+				const authHeader = req.headers.authorization;
+				const token = authHeader?.replace('Bearer ', '');
 
-				if (adminToken) {
-					logger.info('🔍 Looking up Keycloak user...');
-					const userId = await getKeycloakUserId(adminToken, userEmail);
-
-					if (userId) {
-						logger.info('🚪 Logging out from Keycloak...');
-						const keycloakLoggedOut = await logoutKeycloakUser(adminToken, userId);
-
-						if (keycloakLoggedOut) {
-							logger.info('✅ Keycloak sessions terminated');
-						} else {
-							logger.info('⚠️ Failed to logout from Keycloak');
-						}
-					} else {
-						logger.info('⚠️ User not found in Keycloak');
-					}
-				} else {
-					logger.info('⚠️ Failed to get Keycloak admin token');
+				if (!token) {
+					return res.status(400).json({
+						error: 'No token provided',
+						message: 'Authorization header with Bearer token is required'
+					});
 				}
+
+				logger.info('🎫 Token received: ' + token.substring(0, 20) + '...');
+
+				let userEmail = null;
+
+				// 1. Get user info from Directus to get email
+				try {
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+						headers: {
+							'Authorization': `Bearer ${token}`,
+						},
+					});
+
+					if (meResponse.ok) {
+						const userData = await meResponse.json();
+						userEmail = userData.data.email;
+						logger.info('👤 User email: ' + userEmail);
+					}
+				} catch (error) {
+					logger.error('⚠️ Error getting user info: ' + error.message);
+				}
+
+				// 2. Logout from Directus
+				try {
+					const directusLogoutResponse = await fetch(`${PUBLIC_URL}/auth/logout`, {
+						method: 'POST',
+						headers: {
+							'Authorization': `Bearer ${token}`,
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify({
+							refresh_token: token,
+						}),
+					});
+
+					if (directusLogoutResponse.ok) {
+						logger.info('✅ Directus session invalidated');
+					} else {
+						logger.info('⚠️ Directus logout response: ' + directusLogoutResponse.status);
+					}
+				} catch (error) {
+					logger.error('⚠️ Error logging out from Directus: ' + error.message);
+				}
+
+				// 3. Logout from Keycloak using Admin API
+				if (userEmail) {
+					try {
+						logger.info('🔐 Getting Keycloak admin token...');
+						const adminToken = await getKeycloakAdminToken();
+
+						if (adminToken) {
+							logger.info('🔍 Looking up Keycloak user...');
+							const userId = await getKeycloakUserId(adminToken, userEmail);
+
+							if (userId) {
+								logger.info('🚪 Logging out from Keycloak...');
+								const keycloakLoggedOut = await logoutKeycloakUser(adminToken, userId);
+
+								if (keycloakLoggedOut) {
+									logger.info('✅ Keycloak sessions terminated');
+								} else {
+									logger.info('⚠️ Failed to logout from Keycloak');
+								}
+							} else {
+								logger.info('⚠️ User not found in Keycloak');
+							}
+						} else {
+							logger.info('⚠️ Failed to get Keycloak admin token');
+						}
+					} catch (error) {
+						logger.error('⚠️ Error logging out from Keycloak: ' + error.message);
+					}
+				}
+
+				logger.info('🎉 Logout completed');
+
+				res.json({
+					success: true,
+					message: 'Logged out successfully from Directus and Keycloak'
+				});
+
 			} catch (error) {
-				logger.error('⚠️ Error logging out from Keycloak: ' + error.message);
+				logger.error('❌ Error in logout:', error);
+				res.status(500).json({
+					error: error.message,
+					message: 'Failed to logout'
+				});
 			}
-		}
-
-		logger.info('🎉 Logout completed');
-
-		res.json({
-			success: true,
-			message: 'Logged out successfully from Directus and Keycloak'
 		});
-
-	} catch (error) {
-		logger.error('❌ Error in logout:', error);
-		res.status(500).json({
-			error: error.message,
-			message: 'Failed to logout'
-		});
-	}
-});
 
 		// WebView SSO Bridge - Establishes browser session from mobile token
 
