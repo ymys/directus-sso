@@ -18,6 +18,7 @@ export default {
 		const COOKIE_SECURE = env.COOKIE_SECURE !== 'false';
 		const COOKIE_SAME_SITE = env.COOKIE_SAME_SITE || 'lax';
 		const SESSION_COOKIE_NAME = env.SESSION_COOKIE_NAME || 'directus_session_token';
+		const REFRESH_TOKEN_COOKIE_NAME = env.REFRESH_TOKEN_COOKIE_NAME || 'directus_refresh_token';
 		const CORE_COOKIE_NAME = 'directus_session_token'; // Core always uses this name internally
 
 		logger.info('🚀 Mobile Auth Proxy Extension loaded');
@@ -25,6 +26,7 @@ export default {
 		logger.info('🌐 Keycloak Realm: ' + KEYCLOAK_REALM);
 		logger.info('📡 Public URL: ' + PUBLIC_URL);
 		logger.info('🍪 Session Cookie Name: ' + SESSION_COOKIE_NAME);
+		logger.info('🍪 Refresh Token Cookie Name: ' + REFRESH_TOKEN_COOKIE_NAME);
 
 		logger.info('📱 Mobile App Scheme: ' + MOBILE_APP_SCHEME + '://' + MOBILE_APP_CALLBACK_PATH);
 		logger.info('🔵 Google OAuth enabled');
@@ -213,10 +215,10 @@ export default {
 		 * If we have a refresh token, try to exchange it for a new session.
 		 */
 		async function tryRefreshToken(req) {
-			const refreshToken = req.cookies['directus_refresh_token'];
+			const refreshToken = req.cookies[REFRESH_TOKEN_COOKIE_NAME];
 			if (!refreshToken) return null;
 
-			logger.info('🔄 [REFRESH] Attempting to use directus_refresh_token...');
+			logger.info(`🔄 [REFRESH] Attempting to use ${REFRESH_TOKEN_COOKIE_NAME}...`);
 			try {
 				const refreshResponse = await fetch(`${PUBLIC_URL}/auth/refresh`, {
 					method: 'POST',
