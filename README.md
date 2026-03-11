@@ -39,6 +39,8 @@ GOOGLE_CALLBACK_PATH=/auth/callback/google
 COOKIE_DOMAIN=.your-domain.com
 COOKIE_SECURE=true
 COOKIE_SAME_SITE=lax
+SESSION_COOKIE_NAME=directus_session_token
+REFRESH_TOKEN_COOKIE_NAME=directus_refresh_token
 ```
 
 ### Security Note
