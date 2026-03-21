@@ -345,16 +345,52 @@ export default {
 				}
 
 				// FIXED 2: Build redirect URL manually to support custom schemes perfectly
-				// E.g., portalpipq://auth/callback?access_token=...
-				// Note: Ensure your MOBILE_APP_CALLBACK_PATH starts with an extra slash if you want two slashes! 
-				// If MOBILE_APP_CALLBACK_PATH is "/auth/callback", this builds "portalpipq:/auth/callback" which React Native handles strictly like a real URI path.
-				const redirectPath = MOBILE_APP_CALLBACK_PATH.startsWith('/') ? MOBILE_APP_CALLBACK_PATH : `//${MOBILE_APP_CALLBACK_PATH}`;
-				const redirectUrl = `${MOBILE_APP_SCHEME}:${redirectPath}?access_token=${accessToken}&user_id=${userId}&email=${encodeURIComponent(userEmail || '')}`;
+				// Allows dynamic schemes via query parameters for multi-tenant setups
+				const scheme = req.query.app_scheme || MOBILE_APP_SCHEME;
+				const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+				const redirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?access_token=${accessToken}&user_id=${userId}&email=${encodeURIComponent(userEmail || '')}`;
 
-				logger.info('🔄 Redirecting to app: ' + redirectUrl);
+				logger.info('🔄 Attempting AUTO-REDIRECT to app: ' + redirectUrl);
 
-				// Use HTTP redirect for mobile apps
-				res.redirect(redirectUrl);
+				// Hybrid Strategy: Send 302 header AND HTML body
+				// 1. HTTP 302 is the fastest way to auto-redirect (works on most browsers)
+				res.setHeader('Location', redirectUrl);
+
+				// 2. HTML body is the fallback (shows button if 302 is blocked)
+				return res.status(302).send(`
+					<html>
+						<head>
+							<title>Authenticating...</title>
+							<meta name="viewport" content="width=device-width, initial-scale=1">
+							<meta http-equiv="refresh" content="0;url=${redirectUrl}">
+							<style>
+								body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+								       padding: 40px; text-align: center; background: #fff; }
+								.lds-dual-ring { display: inline-block; width: 40px; height: 40px; margin-bottom: 20px; }
+								.lds-dual-ring:after { content: " "; display: block; width: 32px; height: 32px; margin: 8px; 
+								                      border-radius: 50%; border: 4px solid #4f46e5; 
+													  border-color: #4f46e5 transparent #4f46e5 transparent; 
+													  animation: lds-dual-ring 1.2s linear infinite; }
+								@keyframes lds-dual-ring { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+								.btn { display: inline-block; padding: 12px 24px; background: #4f46e5; color: white; 
+								       text-decoration: none; border-radius: 6px; font-weight: 500; margin-top: 20px; }
+							</style>
+						</head>
+						<body>
+							<div class="lds-dual-ring"></div>
+							<h2>Finishing Login...</h2>
+							<p>You are being redirected back to the app.</p>
+							<p style="font-size: 14px; color: #666; margin-top: 20px;">If the app doesn't open automatically, please click below:</p>
+							<a id="redirect-btn" href="${redirectUrl}" class="btn">Return to App</a>
+							<script>
+								// JavaScript fallback for auto-redirect
+								window.onload = function() {
+									window.location.href = "${redirectUrl}";
+								};
+							</script>
+						</body>
+					</html>
+				`);
 
 			} catch (error) {
 				logger.error('❌ Error in callback:', error);
@@ -520,8 +556,10 @@ export default {
 				// Handle mobile app requests
 				logger.info('📱 Mobile app request - redirecting with token');
 
-				// Build redirect URL with token for Google callback
-				const redirectUrl = new URL(`${MOBILE_APP_SCHEME}://${GOOGLE_CALLBACK_PATH}`);
+				// Build redirect URL with token for Google callback (with dynamic scheme support)
+				const scheme = req.query.app_scheme || MOBILE_APP_SCHEME;
+				const path = req.query.app_path || GOOGLE_CALLBACK_PATH;
+				const redirectUrl = new URL(`${scheme}://${path.replace(/^\/+/, '')}`);
 				redirectUrl.searchParams.set('access_token', accessToken);
 				redirectUrl.searchParams.set('user_id', userId);
 				redirectUrl.searchParams.set('email', userEmail || '');
