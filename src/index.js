@@ -416,9 +416,20 @@ export default {
 			logger.info('Query: ' + JSON.stringify(req.query));
 
 			try {
-				// 1. Try by name (v1.5.3 brute-force)
 				let authResult = null;
-				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+
+				// 0. Try URL query parameters directly (Directus mode=json bypasses iOS 302 cookie dropping)
+				if (req.query.access_token) {
+					logger.info('🎟️ Found access_token in URL query string! Bypassing cookie check entirely.');
+					authResult = {
+						access_token: req.query.access_token,
+						refresh_token: req.query.refresh_token || null,
+						expires: req.query.expires || null
+					};
+				}
+
+				// 1. Try by name (v1.5.3 brute-force)
+				if (!authResult && SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
 					authResult = await tryAllCookies(req, SESSION_COOKIE_NAME);
 				}
 				if (!authResult) {
