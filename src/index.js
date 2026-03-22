@@ -625,12 +625,34 @@ export default {
 								</div>
 								<a id="redirect-btn" href="${redirectUrl.toString()}" class="btn">Return to App</a>
 								<script>
-									// Try automatic redirect instantly
-									window.location.replace("${redirectUrl.toString()}");
+									const normalUrl = "${redirectUrl.toString()}";
+									
+									// Build Chrome Intent URL for more reliable automatic trigger on Android
+									// Format: intent://[host]/[path]#[Intent];scheme=[scheme];package=[package];end
+									// We only do this for the main app scheme 'formasjid'
+									const scheme = "${scheme}";
+									const path = "${path.replace(/^\/+/, '')}";
+									const search = "${redirectUrl.search}";
+									let intentUrl = normalUrl;
+									
+									if (scheme === 'formasjid') {
+										intentUrl = "intent://" + path + search + "#Intent;scheme=formasjid;package=org.formasjid.app;end";
+										// Update button to use intent URL too for better reliability
+										document.getElementById('redirect-btn').href = intentUrl;
+									}
+
+									// Try automatic redirect using Intent first (if available) or normal URL
+									window.location.replace(intentUrl);
+									
 									// Fallback timer if automatic redirect is blocked
 									setTimeout(function() {
-										window.location.href = "${redirectUrl.toString()}";
+										window.location.href = intentUrl;
 									}, 1000);
+									
+									// Final fallback to normal URL if intent fails
+									setTimeout(function() {
+										window.location.href = normalUrl;
+									}, 3000);
 								</script>
 							</div>
 						</body>
