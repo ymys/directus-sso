@@ -583,8 +583,18 @@ export default {
 
 				logger.info('🔄 Redirecting to app (Google): ' + redirectUrl.toString());
 
+				// Detect platform for seamless experience
+				const userAgent = req.headers['user-agent'] || '';
+				const isIos = /iPhone|iPad|iPod/i.test(userAgent);
+				const isExpoGo = scheme === 'exp'; // Expo Go uses exp:// scheme
+
+				if ((isIos || isExpoGo) && !req.query.force_landing) {
+					logger.info('🍎/📱 iOS/ExpoGo detected - performing seamless 302 redirect');
+					return res.redirect(302, redirectUrl.toString());
+				}
+
 				// Refined Mobile Redirect (best for Android Chrome)
-				logger.info('🔄 Sending redirect-and-auto-open page for app: ' + redirectUrl.toString());
+				logger.info('🤖 Android/Other detected - sending resilient landing page');
 				return res.send(`
 					<html>
 						<head>
@@ -597,9 +607,13 @@ export default {
 								h2 { color: #2196F3; margin-bottom: 20px; }
 								p { color: #666; margin: 10px 0; }
 								.btn { display: inline-block; padding: 14px 28px; background: #2196F3; 
-								      color: white; text-decoration: none; border-radius: 8px; 
+								      color: white !important; text-decoration: none; border-radius: 8px; 
 								      font-weight: bold; margin-top: 25px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
 								.btn:active { transform: translateY(1px); box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+								.spinner { border: 4px solid #f3f3f3; border-top: 4px solid #2196F3; 
+								          border-radius: 50%; width: 50px; height: 50px; 
+								          animation: spin 1s linear infinite; margin: 0 auto; }
+								@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 							</style>
 						</head>
 						<body>
@@ -607,13 +621,10 @@ export default {
 								<h2>Login Successful!</h2>
 								<p>Redirecting you back to the app...</p>
 								<div style="margin: 30px 0;">
-									<div class="spinner" style="border: 4px solid #f3f3f3; border-top: 4px solid #2196F3; 
-									          border-radius: 50%; width: 50px; height: 50px; 
-									          animation: spin 1s linear infinite; margin: 0 auto;"></div>
+									<div class="spinner"></div>
 								</div>
 								<a id="redirect-btn" href="${redirectUrl.toString()}" class="btn">Return to App</a>
 								<script>
-									@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 									// Try automatic redirect instantly
 									window.location.replace("${redirectUrl.toString()}");
 									// Fallback timer if automatic redirect is blocked
