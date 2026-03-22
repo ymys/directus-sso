@@ -583,15 +583,11 @@ export default {
 
 				logger.info('🔄 Redirecting to app (Google): ' + redirectUrl.toString());
 
-				// Detect platform for seamless experience
-				const userAgent = req.headers['user-agent'] || '';
-				const isIos = /iPhone|iPad|iPod/i.test(userAgent);
-				const isExpoGo = scheme === 'exp'; // Expo Go uses exp:// scheme
-
-				if ((isIos || isExpoGo) && !req.query.force_landing) {
-					logger.info('🍎/📱 iOS/ExpoGo detected - performing seamless 302 redirect');
-					return res.redirect(302, redirectUrl.toString());
-				}
+				// SEAMLESS REDIRECT (302)
+				// We now use a direct 302 redirect for all platforms.
+				logger.info('🚀 Performing direct 302 redirect to app: ' + redirectUrl.toString());
+				return res.redirect(302, redirectUrl.toString());
+/*
 
 				// Refined Mobile Redirect (best for Android Chrome)
 				logger.info('🤖 Android/Other detected - sending resilient landing page');
@@ -657,7 +653,7 @@ export default {
 							</div>
 						</body>
 					</html>
-				`);
+				*/
 				
 			} catch (error) {
 				logger.error('❌ Error in Google callback:', error);
