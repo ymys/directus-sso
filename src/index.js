@@ -581,10 +581,50 @@ export default {
 				redirectUrl.searchParams.set('email', userEmail || '');
 				redirectUrl.searchParams.set('provider', 'google');
 
-				logger.info('🔄 Redirecting to app (Google): ' + redirectUrl.toString());
-
-				// Use HTTP redirect for mobile apps
-				res.redirect(redirectUrl.toString());
+				// Use a dedicated landing page for mobile apps to ensure Android Chrome compatibility
+				logger.info('📱 Serving mobile redirect landing page: ' + redirectUrl.toString());
+				
+				res.send(`
+					<html>
+						<head>
+							<title>Kembali ke Aplikasi</title>
+							<meta name="viewport" content="width=device-width, initial-scale=1.0">
+							<style>
+								body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+								       padding: 20px; text-align: center; background: #f5f5f5; 
+									   display: flex; flex-direction: column; align-items: center; justify-content: center; height: 90vh; }
+								.container { max-width: 400px; width: 100%; background: white; 
+								           padding: 40px 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+								.logo { width: 80px; height: 80px; margin-bottom: 20px; border-radius: 16px; }
+								h2 { color: #333; margin-bottom: 10px; }
+								p { color: #666; margin-bottom: 30px; line-height: 1.5; }
+								.btn { display: inline-block; width: 100%; padding: 15px; 
+								      background: linear-gradient(135deg, #00B3CE 0%, #006195 100%); 
+									  color: white !important; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; box-sizing: border-box; }
+								.btn:active { opacity: 0.8; transform: scale(0.98); }
+								.spinner { border: 3px solid #f3f3f3; border-top: 3px solid #00B3CE; 
+								          border-radius: 50%; width: 24px; height: 24px; 
+								          animation: spin 1s linear infinite; margin: 20px auto; }
+								@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+							</style>
+						</head>
+						<body>
+							<div class="container">
+								<img src="${PUBLIC_URL}/assets/icon.png" class="logo" onerror="this.style.display='none'">
+								<h2>Berhasil!</h2>
+								<div class="spinner"></div>
+								<p>Sedang mengalihkan Anda kembali ke aplikasi Formasjid...</p>
+								<a href="${redirectUrl.toString()}" class="btn">BUKA APLIKASI</a>
+							</div>
+							<script>
+								// Attempt auto-redirect
+								setTimeout(function() {
+									window.location.href = "${redirectUrl.toString()}";
+								}, 500);
+							</script>
+						</body>
+					</html>
+				`);
 
 			} catch (error) {
 				logger.error('❌ Error in Google callback:', error);
