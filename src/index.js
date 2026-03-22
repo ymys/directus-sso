@@ -581,51 +581,51 @@ export default {
 				redirectUrl.searchParams.set('email', userEmail || '');
 				redirectUrl.searchParams.set('provider', 'google');
 
-				// Use a dedicated landing page for mobile apps to ensure Android Chrome compatibility
-				logger.info('📱 Serving mobile redirect landing page: ' + redirectUrl.toString());
-				
-				res.send(`
+				logger.info('🔄 Redirecting to app (Google): ' + redirectUrl.toString());
+
+				// Refined Mobile Redirect (best for Android Chrome)
+				logger.info('🔄 Sending redirect-and-auto-open page for app: ' + redirectUrl.toString());
+				return res.send(`
 					<html>
 						<head>
-							<title>Kembali ke Aplikasi</title>
-							<meta name="viewport" content="width=device-width, initial-scale=1.0">
+							<meta name="viewport" content="width=device-width, initial-scale=1">
 							<style>
 								body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-								       padding: 20px; text-align: center; background: #f5f5f5; 
-									   display: flex; flex-direction: column; align-items: center; justify-content: center; height: 90vh; }
-								.container { max-width: 400px; width: 100%; background: white; 
-								           padding: 40px 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-								.logo { width: 80px; height: 80px; margin-bottom: 20px; border-radius: 16px; }
-								h2 { color: #333; margin-bottom: 10px; }
-								p { color: #666; margin-bottom: 30px; line-height: 1.5; }
-								.btn { display: inline-block; width: 100%; padding: 15px; 
-								      background: linear-gradient(135deg, #00B3CE 0%, #006195 100%); 
-									  color: white !important; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; box-sizing: border-box; }
-								.btn:active { opacity: 0.8; transform: scale(0.98); }
-								.spinner { border: 3px solid #f3f3f3; border-top: 3px solid #00B3CE; 
-								          border-radius: 50%; width: 24px; height: 24px; 
-								          animation: spin 1s linear infinite; margin: 20px auto; }
-								@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+								       padding: 40px; text-align: center; background: #fff; }
+								.container { max-width: 500px; margin: 0 auto; background: white; 
+								           padding: 30px; border-radius: 8px; }
+								h2 { color: #2196F3; margin-bottom: 20px; }
+								p { color: #666; margin: 10px 0; }
+								.btn { display: inline-block; padding: 14px 28px; background: #2196F3; 
+								      color: white; text-decoration: none; border-radius: 8px; 
+								      font-weight: bold; margin-top: 25px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+								.btn:active { transform: translateY(1px); box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
 							</style>
 						</head>
 						<body>
 							<div class="container">
-								<img src="${PUBLIC_URL}/assets/icon.png" class="logo" onerror="this.style.display='none'">
-								<h2>Berhasil!</h2>
-								<div class="spinner"></div>
-								<p>Sedang mengalihkan Anda kembali ke aplikasi Formasjid...</p>
-								<a href="${redirectUrl.toString()}" class="btn">BUKA APLIKASI</a>
+								<h2>Login Successful!</h2>
+								<p>Redirecting you back to the app...</p>
+								<div style="margin: 30px 0;">
+									<div class="spinner" style="border: 4px solid #f3f3f3; border-top: 4px solid #2196F3; 
+									          border-radius: 50%; width: 50px; height: 50px; 
+									          animation: spin 1s linear infinite; margin: 0 auto;"></div>
+								</div>
+								<a id="redirect-btn" href="${redirectUrl.toString()}" class="btn">Return to App</a>
+								<script>
+									@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+									// Try automatic redirect instantly
+									window.location.replace("${redirectUrl.toString()}");
+									// Fallback timer if automatic redirect is blocked
+									setTimeout(function() {
+										window.location.href = "${redirectUrl.toString()}";
+									}, 1000);
+								</script>
 							</div>
-							<script>
-								// Attempt auto-redirect
-								setTimeout(function() {
-									window.location.href = "${redirectUrl.toString()}";
-								}, 500);
-							</script>
 						</body>
 					</html>
 				`);
-
+				
 			} catch (error) {
 				logger.error('❌ Error in Google callback:', error);
 				res.status(500).send(`
