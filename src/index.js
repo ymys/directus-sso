@@ -115,6 +115,11 @@ export default {
 			if (req.query.type === 'browser') return true;
 			if (req.query.type === 'mobile') return false;
 
+			// If we have an app_scheme or app_path, it's definitely a mobile app request
+			if (req.query.app_scheme || req.query.app_path) {
+				return false;
+			}
+
 			// Check User-Agent for common browser patterns
 			const userAgent = req.headers['user-agent'] || '';
 			const isBrowser = /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(userAgent) &&
