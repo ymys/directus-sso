@@ -822,8 +822,11 @@ export default {
 					if (payload.iss !== 'https://appleid.apple.com') throw new Error('Invalid issuer');
 					
 					// Allow both the production bundle ID and Expo Go (for testing)
-					const allowedAudiences = [clientID, 'host.exp.exponent'];
-					if (!allowedAudiences.includes(payload.aud)) {
+					// Note: Expo Go uses 'host.exp.Exponent' (note the capital E)
+					const allowedAudiences = [clientID.toLowerCase(), 'host.exp.exponent'];
+					const actualAud = payload.aud.toLowerCase();
+					
+					if (!allowedAudiences.includes(actualAud)) {
 						logger.error(`❌ Invalid audience: ${payload.aud}. Expected one of: ${allowedAudiences.join(', ')}`);
 						throw new Error('Invalid audience');
 					}
