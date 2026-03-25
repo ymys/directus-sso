@@ -1,7 +1,7 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
-import appleSignin from 'apple-signin-auth';
+import crypto from 'node:crypto';
 
 export default {
 	id: 'sso',
@@ -808,15 +808,41 @@ export default {
 			}
 
 			try {
-				// 1. Verify Apple Token
-				// Bundle ID is used as clientID for native iOS tokens
+				// 1. Verify Apple Token (Native Node.js Implementation)
 				const clientID = 'com.forumbandung.app';
 				
-				const decodedToken = await appleSignin.verifyIdToken(identityToken, {
-					audience: clientID,
-					ignoreExpiration: false,
-				});
+				const verifyAppleToken = async (idToken) => {
+					const [headerB64, payloadB64, signatureB64] = idToken.split('.');
+					const header = JSON.parse(Buffer.from(headerB64, 'base64').toString());
+					const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString());
+					
+					// Basic validation
+					if (payload.iss !== 'https://appleid.apple.com') throw new Error('Invalid issuer');
+					if (payload.aud !== clientID) throw new Error('Invalid audience');
+					if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('Token expired');
 
+					// Fetch Apple Public Keys
+					const response = await fetch('https://appleid.apple.com/auth/keys');
+					const { keys } = await response.json();
+					const key = keys.find(k => k.kid === header.kid);
+					if (!key) throw new Error('Apple public key not found');
+
+					// Verify Signature using native crypto
+					const keyObject = crypto.createPublicKey({
+						key: key,
+						format: 'jwk'
+					});
+
+					const verify = crypto.createVerify('RSA-SHA256');
+					verify.update(`${headerB64}.${payloadB64}`);
+					
+					const isValid = verify.verify(keyObject, signatureB64, 'base64url');
+					if (!isValid) throw new Error('Invalid signature');
+
+					return payload;
+				};
+
+				const decodedToken = await verifyAppleToken(identityToken);
 				const { email, sub } = decodedToken;
 
 				if (!email) {
