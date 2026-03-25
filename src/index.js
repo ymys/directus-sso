@@ -915,32 +915,42 @@ export default {
 				// In Directus extensions, we don't have a direct 'loginUser' method that takes just user ID.
 				// However, if we're on a version that supports it, we can use static token or internal session.
 				
-				// For this custom SSO implementation, we'll try to get tokens using the internal AuthenticationService.
-				// If that fails, we return the user_id and email so the mobile app can attempt its next step.
-				
 				try {
-					// Some versions of Directus allow:
-					// const result = await authService.login('apple', { email });
-					// but that requires an 'apple' auth provider to be configured.
+					// For Apple SSO, we'll use a static token approach which is very reliable for mobile.
+					// 1. Get user with token
+					const userWithToken = await usersService.readOne(userId, {
+						fields: ['*', 'token']
+					});
 					
-					// Return success with user data
+					let sessionToken = userWithToken.token;
+					
+					// 2. Generate token if it doesn't exist
+					if (!sessionToken) {
+						logger.info(`🔑 Generating new static token for user: ${userId}`);
+						sessionToken = crypto.randomBytes(32).toString('hex');
+						await usersService.updateOne(userId, {
+							token: sessionToken
+						});
+					}
+
+					// Return success with real tokens in the format the mobile app expects
 					res.json({
 						success: true,
 						data: {
-							user: user,
-							token: "Apple session established" // This is a placeholder, usually we'd mint a real JWT here
+							access_token: sessionToken,
+							refresh_token: sessionToken,
+							expires: 3600 * 24 * 7, // 7 days
+							user: userWithToken
 						},
 						user_id: userId,
 						email: email,
 						provider: 'apple'
 					});
 				} catch (authError) {
-					logger.error('⚠️ Could not generate internal session token: ' + authError.message);
-					res.json({
-						success: true,
-						user_id: userId,
-						email: email,
-						message: 'Apple authentication verified but session generation failed. Check server logs.'
+					logger.error('⚠️ Could not generate static token: ' + authError.message);
+					res.status(500).json({
+						error: 'Session error',
+						message: 'Apple authentication verified but session generation failed.'
 					});
 				}
 
@@ -954,7 +964,72 @@ export default {
 		});
 
 		// WebView SSO Bridge - Establishes browser session from mobile token
+		router.get('/bridge', async (req, res) => {
+			const { token, redirect_uri, redirect } = req.query;
+			const targetToken = token;
+			const targetRedirect = redirect_uri || redirect || '/';
 
+			logger.info('🌉 WebView Bridge request received');
+
+			if (!targetToken) {
+				return res.status(400).json({
+					error: 'Token required',
+					message: 'No access token provided'
+				});
+			}
+
+			try {
+				// Verify token by calling /users/me
+				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+					headers: {
+						'Authorization': `Bearer ${targetToken}`,
+					},
+				});
+
+				if (!meResponse.ok) {
+					logger.error('❌ Bridge: Invalid token provided');
+					return res.status(401).json({
+						error: 'Invalid token',
+						message: 'The provided token is invalid or expired'
+					});
+				}
+
+				const userData = await meResponse.json();
+				logger.info(`✅ Bridge: Session established for ${userData.data.email}`);
+
+				// Set session cookie
+				res.cookie(SESSION_COOKIE_NAME, targetToken, {
+					httpOnly: true,
+					secure: COOKIE_SECURE,
+					domain: COOKIE_DOMAIN,
+					sameSite: COOKIE_SAME_SITE,
+					maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+					path: '/',
+				});
+
+				// Bridge core cookie too if names differ
+				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+					res.cookie(CORE_COOKIE_NAME, targetToken, {
+						httpOnly: true,
+						secure: COOKIE_SECURE,
+						domain: COOKIE_DOMAIN,
+						sameSite: COOKIE_SAME_SITE,
+						maxAge: 7 * 24 * 60 * 60 * 1000,
+						path: '/',
+					});
+				}
+
+				logger.info('🔄 Bridge: Redirecting to ' + targetRedirect);
+				return res.redirect(targetRedirect);
+
+			} catch (error) {
+				logger.error('❌ Bridge error: ' + error.message);
+				res.status(500).json({
+					error: 'Bridge failure',
+					message: error.message
+				});
+			}
+		});
 
 	}
 };
