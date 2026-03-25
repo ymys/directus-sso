@@ -816,9 +816,18 @@ export default {
 					const header = JSON.parse(Buffer.from(headerB64, 'base64').toString());
 					const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString());
 					
+					logger.info('🍎 Apple Token Payload: ' + JSON.stringify(payload));
+
 					// Basic validation
 					if (payload.iss !== 'https://appleid.apple.com') throw new Error('Invalid issuer');
-					if (payload.aud !== clientID) throw new Error('Invalid audience');
+					
+					// Allow both the production bundle ID and Expo Go (for testing)
+					const allowedAudiences = [clientID, 'host.exp.exponent'];
+					if (!allowedAudiences.includes(payload.aud)) {
+						logger.error(`❌ Invalid audience: ${payload.aud}. Expected one of: ${allowedAudiences.join(', ')}`);
+						throw new Error('Invalid audience');
+					}
+					
 					if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('Token expired');
 
 					// Fetch Apple Public Keys
