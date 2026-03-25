@@ -2,6 +2,7 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 import crypto from 'node:crypto';
+import jwt from 'jsonwebtoken';
 
 export default {
 	id: 'sso',
@@ -906,48 +907,44 @@ export default {
 				}
 
 				// 3. Generate Directus Session
-				const authService = new AuthenticationService({
-					schema,
-					knex: database
-				});
-
-				// Since we verified the identity with Apple, we can bypass password check
-				// In Directus extensions, we don't have a direct 'loginUser' method that takes just user ID.
-				// However, if we're on a version that supports it, we can use static token or internal session.
-				
+				// Since we verified the identity with Apple, we can bypass password check and just mint a valid JWT
 				try {
-					// For Apple SSO, we'll use a static token approach which is very reliable for mobile.
-					// 1. Get user with token
-					const userWithToken = await usersService.readOne(userId, {
-						fields: ['*', 'token']
+					const payload = {
+						id: userId,
+						role: user.role || env.DEFAULT_ROLE_ID || '36010211-604f-4ce3-84d9-4e69d16781a1',
+						app_access: true,
+						admin_access: false
+					};
+
+					const sessionToken = jwt.sign(payload, env.SECRET, {
+						expiresIn: '7d',
+						issuer: 'directus'
 					});
-					
-					let sessionToken = userWithToken.token;
-					
-					// 2. Generate token if it doesn't exist
-					if (!sessionToken) {
-						logger.info(`🔑 Generating new static token for user: ${userId}`);
-						sessionToken = crypto.randomBytes(32).toString('hex');
-						await usersService.updateOne(userId, {
-							token: sessionToken
-						});
-					}
+
+					const refreshTokenPayload = {
+						id: userId,
+						type: 'refresh'
+					};
+					const refreshToken = jwt.sign(refreshTokenPayload, env.SECRET, {
+						expiresIn: '30d',
+						issuer: 'directus'
+					});
 
 					// Return success with real tokens in the format the mobile app expects
 					res.json({
 						success: true,
 						data: {
 							access_token: sessionToken,
-							refresh_token: sessionToken,
+							refresh_token: refreshToken,
 							expires: 3600 * 24 * 7, // 7 days
-							user: userWithToken
+							user: user
 						},
 						user_id: userId,
 						email: email,
 						provider: 'apple'
 					});
 				} catch (authError) {
-					logger.error('⚠️ Could not generate static token: ' + authError.message);
+					logger.error('⚠️ Could not generate JWT session token: ' + authError.message);
 					res.status(500).json({
 						error: 'Session error',
 						message: 'Apple authentication verified but session generation failed.'
