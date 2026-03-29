@@ -22,6 +22,7 @@ export default {
 		const COOKIE_SAME_SITE = env.COOKIE_SAME_SITE || 'lax';
 		const SESSION_COOKIE_NAME = env.SESSION_COOKIE_NAME || 'directus_session_token';
 		const REFRESH_TOKEN_COOKIE_NAME = env.REFRESH_TOKEN_COOKIE_NAME || 'directus_refresh_token';
+		const DEFAULT_ROLE_ID = env.DEFAULT_ROLE_ID || null;
 		const CORE_COOKIE_NAME = 'directus_session_token'; // Core always uses this name internally
 
 		logger.info('🚀 Mobile Auth Proxy Extension loaded');
@@ -430,10 +431,31 @@ export default {
 				if (req.query.access_token) {
 					logger.info('🎟️ Found access_token in URL query string! Bypassing cookie check entirely.');
 					authResult = {
-						access_token: req.query.access_token,
+						token: req.query.access_token,
 						refresh_token: req.query.refresh_token || null,
 						expires: req.query.expires || null
 					};
+					
+					// If we only have the token, we MUST fetch userData
+					try {
+						const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+							headers: {
+								'Authorization': `Bearer ${authResult.token}`,
+							},
+						});
+
+						if (meResponse.ok) {
+							const meData = await meResponse.json();
+							authResult.userData = meData.data;
+							logger.info(`✅ Successfully fetched userData for ${authResult.userData.email}`);
+						} else {
+							logger.error(`❌ Failed to fetch userData with query token (${meResponse.status})`);
+							authResult = null; // Token is invalid or doesn't have permissions
+						}
+					} catch (err) {
+						logger.error(`⚠️ Error fetching userData with query token: ${err.message}`);
+						authResult = null;
+					}
 				}
 
 				// 1. Try by name (v1.5.3 brute-force)
@@ -898,7 +920,7 @@ export default {
 						email,
 						first_name: firstName || 'Apple User',
 						last_name: lastName || '',
-						role: env.DEFAULT_ROLE_ID || '36010211-604f-4ce3-84d9-4e69d16781a1',
+						role: DEFAULT_ROLE_ID,
 						status: 'active',
 						provider: 'apple',
 						external_identifier: sub
@@ -911,7 +933,7 @@ export default {
 				try {
 					const payload = {
 						id: userId,
-						role: user.role || env.DEFAULT_ROLE_ID || '36010211-604f-4ce3-84d9-4e69d16781a1',
+						role: user.role || DEFAULT_ROLE_ID,
 						app_access: true,
 						admin_access: false
 					};

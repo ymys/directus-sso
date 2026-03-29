@@ -1,169 +1,103 @@
-# Directus SSO - Directus Extension
+# Directus SSO - Mobile & Web OAuth Proxy
 
-This extension allows you to use the web and mobile OAuth callback and logout endpoints directly through your Directus domain.
+This extension provides optimized OAuth callback and logout endpoints for Directus, supporting both **Mobile App Deep Linking** and **Web Browser SSO** (Single Sign-On) with automatic detection.
 
-## Installation
+## 🚀 Features
 
-1. **Build the extension:**
+- **Unified Callbacks**: Handle both Keycloak and Google OAuth redirects in one place.
+- **Smart Detection**: Automatically detects if the request comes from a mobile app or a web browser.
+- **Resilient Authentication**:
+  - **Cookie Brute-Force**: Tries multiple session cookies to handle domain conflicts.
+  - **Mega Brute-Force**: Scans all cookies for valid JWT tokens if named lookups fail.
+  - **Refresh Fallback**: Automatically attempts to use refresh tokens if the session is expired.
+- **Dynamic Deep Linking**: Support for multi-tenant mobile apps via `app_scheme` and `app_path` parameters.
+- **Seamless Logout**: Terminate both Directus and Keycloak sessions simultaneously.
+
+## 📦 Installation
+
+1. **Copy to extensions folder:**
+   Ensure this project is in your Directus `extensions/endpoints/sso` directory.
+
+2. **Install dependencies & build:**
    ```bash
-   cd extensions/endpoints/directus-extension-sso
    npm install
    npm run build
    ```
 
-2. **The extension will be automatically loaded by Directus** when you restart it.
+3. **Restart Directus**: The extension will be loaded automatically.
 
-## Endpoints
-
-Once installed, the following endpoints will be available on your Directus domain:
+## 🔌 Endpoints
 
 - **Health Check:** `GET /sso/health`
-- **Mobile/Browser Callback (Keycloak):** `GET /sso/mobile-callback`
-- **Mobile/Browser Callback (Google):** `GET /sso/google-callback`
-- **Mobile Logout:** `POST /sso/mobile-logout`
+- **Keycloak Callback:** `GET /sso/mobile-callback`
+- **Google Callback:** `GET /sso/google-callback`
+- **Logout Proxy:** `POST /sso/mobile-logout`
 
-## Configuration
+## ⚙️ Configuration
 
-The extension uses environment variables from your Directus configuration:
+Add these variables to your Directus `.env` file:
 
-# Add these to your Directus .env file
-KEYCLOAK_URL=http://keycloak:8080
-KEYCLOAK_REALM=testing
+```env
+# Directus Public URL
+PUBLIC_URL=https://directus.example.com
+
+# Keycloak Configuration
+KEYCLOAK_URL=https://keycloak.example.com
+KEYCLOAK_REALM=production
 KEYCLOAK_CLIENT_ID=admin-cli
 KEYCLOAK_ADMIN_USER=admin
-KEYCLOAK_ADMIN_PASSWORD=admin
-PUBLIC_URL=http://localhost:8055
-MOBILE_APP_SCHEME=portalpipq
+KEYCLOAK_ADMIN_PASSWORD=your-password
+
+# Mobile App Defaults
+MOBILE_APP_SCHEME=myapp
 MOBILE_APP_CALLBACK_PATH=/auth/callback
 GOOGLE_CALLBACK_PATH=/auth/callback/google
-COOKIE_DOMAIN=.your-domain.com
+
+# Web SSO Settings
+COOKIE_DOMAIN=.example.com
 COOKIE_SECURE=true
 COOKIE_SAME_SITE=lax
 SESSION_COOKIE_NAME=directus_session_token
 REFRESH_TOKEN_COOKIE_NAME=directus_refresh_token
+DEFAULT_ROLE_ID=your-default-role-uuid
 ```
 
-### Security Note
+### 🍎 Apple Authentication Note
 
-Ensure specific values like `KEYCLOAK_Admin_PASSWORD` are kept secure and not committed to version control. The extension now uses environment variables for all sensitive configuration.
+Unlike Google (which uses Directus's native settings), the **Apple Native Token Flow** (`/apple-token`) manages user creation within this extension. You **must** provide a `DEFAULT_ROLE_ID` in your environment variables to ensure new Apple users are assigned the correct permissions.
 
-## Usage
+## 📱 Mobile Usage
 
-### Browser Authentication Flow
+In your mobile app (e.g., React Native / Expo), point your OAuth login to Directus but use the proxy callbacks:
 
-The extension now supports **both browser and mobile app authentication** with automatic detection. After successful Keycloak login:
-
-- **Browser requests**: Session is saved with cookies, allowing SSO across multiple services
-- **Mobile app requests**: Access token is returned via deep link as before
-
-#### Browser Login Example:
-
-**For Keycloak:**
+### 1. Keycloak Flow
 ```javascript
-// Simply navigate to the login URL
-window.location.href = 'http://your-directus-domain.com/auth/login/keycloak';
-
-// Or with a custom redirect after login
-window.location.href = 'http://your-directus-domain.com/auth/login/keycloak?redirect_uri=/dashboard';
+const loginUrl = `${DIRECTUS_URL}/auth/login/keycloak?redirect_uri=${DIRECTUS_URL}/sso/mobile-callback`;
 ```
 
-**For Google:**
+### 2. Google Flow
 ```javascript
-// Simply navigate to the Google login URL
-window.location.href = 'http://your-directus-domain.com/auth/login/google';
-
-// Or with a custom redirect after login
-window.location.href = 'http://your-directus-domain.com/auth/login/google?redirect_uri=/dashboard';
+const loginUrl = `${DIRECTUS_URL}/auth/login/google?redirect_uri=${DIRECTUS_URL}/sso/google-callback`;
 ```
 
-After successful login, the user will see a success page and the session cookie will be saved. The user can then access other URLs using the same SSO without logging in again.
+### 3. Dynamic App Redirection
+If you have multiple apps or environments, you can override the scheme/path:
+```javascript
+const loginUrl = `${DIRECTUS_URL}/auth/login/google?redirect_uri=${DIRECTUS_URL}/sso/google-callback&app_scheme=alternateapp&app_path=/custom/callback`;
+```
 
-#### Forcing Browser Mode:
+## 🌐 Web SSO Usage
 
-If auto-detection doesn't work correctly, you can force browser mode:
+For browser-based apps, simply navigate to the login endpoints. The extension will set the appropriate cookies and redirect the user:
 
 ```javascript
-window.location.href = 'http://your-directus-domain.com/auth/login/keycloak?type=browser';
+// Navigates to Directus login, then redirects back to your dashboard with session cookies set
+window.location.href = `${DIRECTUS_URL}/auth/login/keycloak?redirect_uri=https://dashboard.example.com`;
 ```
 
-#### Query Parameters:
+## 🔐 Security Note
 
-- `type`: Force `browser` or `mobile` mode (optional, auto-detected if not provided)
-- `redirect_uri` or `redirect`: URL to redirect to after successful login (optional, defaults to `/admin`)
+This extension facilitates session bridging. Ensure `COOKIE_SECURE=true` is used in production and `COOKIE_DOMAIN` is correctly scoped to your parent domain (e.g., `.example.com`) to enable SSO between subdomains.
 
-### Mobile App Authentication Flow
-
-Update your mobile app to use the new Directus domain URLs:
-
-### Before (separate proxy server):
-```javascript
-const PROXY_URL = 'http://your-proxy-domain.com:3000';
-const callbackUrl = `${PROXY_URL}/mobile-callback`;
-```
-
-### After (Directus extension):
-```javascript
-const DIRECTUS_URL = 'http://your-directus-domain.com';
-const callbackUrl = `${DIRECTUS_URL}/sso/mobile-callback`;
-```
-
-### Login Flow:
-```javascript
-import * as WebBrowser from 'expo-web-browser';
-
-const result = await WebBrowser.openAuthSessionAsync(
-  `${DIRECTUS_URL}/auth/login/keycloak`,
-  'myapp://auth/callback'
-);
-```
-
-### Logout:
-```javascript
-const response = await fetch(`${DIRECTUS_URL}/sso/mobile-logout`, {
-  method: 'POST',
-  headers: {
-    'Authorization': `Bearer ${accessToken}`,
-  },
-});
-```
-
-## Advantages Over Standalone Proxy
-
-1. **Single Domain:** No need to deploy a separate server
-2. **Unified Management:** Managed alongside your Directus instance
-3. **Same Environment:** Uses Directus environment variables and configuration
-4. **Built-in Logging:** Uses Directus logger for consistent logging
-5. **Easier Deployment:** Deployed automatically with Directus
-
-## Development
-
-To make changes and test locally:
-
-```bash
-cd extensions/endpoints/directus-extension-sso
-npm run dev
-```
-
-This will watch for changes and rebuild automatically.
-
-## Keycloak Client Configuration
-
-Update your Keycloak client's redirect URI to use the Directus domain:
-
-**Valid Redirect URIs:**
-```
-http://your-directus-domain.com/auth/login/keycloak/callback
-http://your-directus-domain.com/sso/mobile-callback
-myapp://auth/callback
-```
-
-**Web Origins:**
-```
-http://your-directus-domain.com
-```
-
-## Notes
-
-- The extension requires Directus 11.0.0 or higher
-- Make sure cookie-parser middleware is available (Directus includes this by default)
-- The extension has access to the same network as Directus, so internal service URLs (like `http://keycloak:8080`) will work if using Docker
+---
+Built with ❤️ for Directus.
