@@ -16,9 +16,13 @@ export default {
 
 		// --- UPGRADE MULTI-APP SCHEME ---
 		const rawSchemes = env.MOBILE_APP_SCHEME || 'finsnapp';
-		// Pecah string "finsnapp,irapat" menjadi Array: ['finsnapp', 'irapat']
-		const ALLOWED_SCHEMES = rawSchemes.split(',').map(s => s.trim());
-		const DEFAULT_SCHEME = ALLOWED_SCHEMES[0]; // Default ambil yang pertama
+
+		// Cek apakah Directus sudah mengubahnya jadi Array, kalau belum baru di-split
+		const ALLOWED_SCHEMES = Array.isArray(rawSchemes)
+			? rawSchemes.map(s => String(s).trim())
+			: String(rawSchemes).split(',').map(s => s.trim());
+
+		const DEFAULT_SCHEME = ALLOWED_SCHEMES[0];
 		// --------------------------------
 
 		const MOBILE_APP_CALLBACK_PATH = env.MOBILE_APP_CALLBACK_PATH || '/auth/callback';
