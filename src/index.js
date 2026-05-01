@@ -8,22 +8,22 @@ export default {
 	id: 'sso',
 	handler: (router, context) => {
 		const { env, logger, services, database, getSchema } = context;
+
+		// ==========================================
+		// 1. KONFIGURASI ENVIRONMENT
+		// ==========================================
 		const KEYCLOAK_URL = env.KEYCLOAK_URL || 'http://keycloak:8080';
 		const KEYCLOAK_REALM = env.KEYCLOAK_REALM || 'testing';
 		const KEYCLOAK_ADMIN_USER = env.KEYCLOAK_ADMIN_USER || 'admin';
 		const KEYCLOAK_ADMIN_PASSWORD = env.KEYCLOAK_ADMIN_PASSWORD || 'admin';
 		const PUBLIC_URL = env.PUBLIC_URL || 'http://localhost:8055';
 
-		// --- UPGRADE MULTI-APP SCHEME ---
+		// Multi-App Scheme
 		const rawSchemes = env.MOBILE_APP_SCHEME || 'finsnapp';
-
-		// Cek apakah Directus sudah mengubahnya jadi Array, kalau belum baru di-split
 		const ALLOWED_SCHEMES = Array.isArray(rawSchemes)
 			? rawSchemes.map(s => String(s).trim())
 			: String(rawSchemes).split(',').map(s => s.trim());
-
 		const DEFAULT_SCHEME = ALLOWED_SCHEMES[0];
-		// --------------------------------
 
 		const MOBILE_APP_CALLBACK_PATH = env.MOBILE_APP_CALLBACK_PATH || '/auth/callback';
 		const GOOGLE_CALLBACK_PATH = env.GOOGLE_CALLBACK_PATH || '/auth/callback/google';
@@ -36,11 +36,23 @@ export default {
 		const DEFAULT_ROLE_ID = env.DEFAULT_ROLE_ID || null;
 		const CORE_COOKIE_NAME = 'directus_session_token';
 
-		logger.info('🚀 Mobile Auth Proxy Extension loaded');
-		logger.info('📱 Allowed Mobile App Schemes: ' + ALLOWED_SCHEMES.join(', '));
-		logger.info('🔵 Google OAuth enabled');
+		// Konfigurasi FCM (Firebase Cloud Messaging)
+		const FCM_PROJECT_ID = env.FCM_PROJECT_ID || null;
+		const FCM_CLIENT_EMAIL = env.FCM_CLIENT_EMAIL || null;
+		const FCM_PRIVATE_KEY = env.FCM_PRIVATE_KEY ? env.FCM_PRIVATE_KEY.replace(/\\n/g, '\n') : null;
+		const FCM_WEBHOOK_SECRET = env.FCM_WEBHOOK_SECRET || null;
 
-		// Helper function to get Keycloak admin token
+		logger.info('🚀 Mobile Auth & FCM Proxy Extension loaded');
+		logger.info('📱 Allowed Mobile App Schemes: ' + ALLOWED_SCHEMES.join(', '));
+		if (FCM_PROJECT_ID && FCM_PRIVATE_KEY) {
+			logger.info('🔔 FCM Module: ENABLED for project ' + FCM_PROJECT_ID);
+		} else {
+			logger.warn('⚠️ FCM Module: DISABLED (Missing Credentials in .env)');
+		}
+
+		// ==========================================
+		// 2. HELPER FUNCTIONS SSO
+		// ==========================================
 		async function getKeycloakAdminToken() {
 			try {
 				const response = await fetch(`${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`, {
@@ -62,7 +74,6 @@ export default {
 			}
 		}
 
-		// Helper function to get user ID from email
 		async function getKeycloakUserId(adminToken, email) {
 			try {
 				const response = await fetch(
@@ -78,7 +89,6 @@ export default {
 			}
 		}
 
-		// Helper function to logout user sessions in Keycloak
 		async function logoutKeycloakUser(adminToken, userId) {
 			try {
 				const response = await fetch(
@@ -92,20 +102,13 @@ export default {
 			}
 		}
 
-		// Health check
-		router.get('/health', (req, res) => {
-			res.json({ status: 'ok', service: 'directus-extension-sso', version, allowed_schemes: ALLOWED_SCHEMES });
-		});
-
-		// Helper function to detect if request is from browser or mobile app
 		function isBrowserRequest(req) {
 			if (req.query.type === 'browser') return true;
 			if (req.query.type === 'mobile') return false;
 			if (req.query.app_scheme || req.query.app_path) return false;
 			const userAgent = req.headers['user-agent'] || '';
-			const isBrowser = /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(userAgent) &&
+			return /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(userAgent) &&
 				!/Mobile.*App|ReactNative|Expo/i.test(userAgent);
-			return isBrowser;
 		}
 
 		async function tryAllCookies(req, cookieName) {
@@ -183,7 +186,6 @@ export default {
 			return null;
 		}
 
-		// --- SCHEME VALIDATOR HELPER ---
 		function getValidatedScheme(req) {
 			const requestedScheme = req.query.app_scheme;
 			if (requestedScheme && ALLOWED_SCHEMES.includes(requestedScheme)) {
@@ -193,16 +195,22 @@ export default {
 			}
 			return DEFAULT_SCHEME;
 		}
-		// -------------------------------
+
+		// ==========================================
+		// 3. ENDPOINTS API
+		// ==========================================
+
+		// Health check
+		router.get('/health', (req, res) => {
+			res.json({ status: 'ok', service: 'directus-extension-sso', version, allowed_schemes: ALLOWED_SCHEMES, fcm_enabled: !!FCM_PROJECT_ID });
+		});
 
 		// Mobile callback endpoint
 		router.get('/mobile-callback', async (req, res) => {
 			const isBrowser = isBrowserRequest(req);
 			try {
 				let authResult = null;
-				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-					authResult = await tryAllCookies(req, SESSION_COOKIE_NAME);
-				}
+				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) authResult = await tryAllCookies(req, SESSION_COOKIE_NAME);
 				if (!authResult) authResult = await tryAllCookies(req, CORE_COOKIE_NAME);
 				if (!authResult) authResult = await tryEveryPossibleJwt(req);
 				if (!authResult) authResult = await tryRefreshToken(req);
@@ -228,14 +236,12 @@ export default {
 					return res.redirect(redirectTo);
 				}
 
-				// MULTI-TENANT SCHEME SELECTION
 				const scheme = getValidatedScheme(req);
 				const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
 				const redirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?access_token=${accessToken}&user_id=${userId}&email=${encodeURIComponent(userEmail || '')}`;
 
 				res.setHeader('Location', redirectUrl);
 				return res.status(302).send(`<html><head><meta http-equiv="refresh" content="0;url=${redirectUrl}"></head><body>Redirecting...</body></html>`);
-
 			} catch (error) {
 				res.status(500).send(`<html><body><h2>Error</h2><p>${error.message}</p></body></html>`);
 			}
@@ -288,7 +294,6 @@ export default {
 					return res.send(`<html><head><meta http-equiv="refresh" content="2;url=${redirectTo}"></head><body>Login Successful!</body></html>`);
 				}
 
-				// MULTI-TENANT SCHEME SELECTION
 				const scheme = getValidatedScheme(req);
 				const path = req.query.app_path || GOOGLE_CALLBACK_PATH;
 				const redirectUrl = new URL(`${scheme}://${path.replace(/^\/+/, '')}`);
@@ -299,7 +304,6 @@ export default {
 
 				logger.info('🚀 Performing direct 302 redirect to app: ' + redirectUrl.toString());
 				return res.redirect(302, redirectUrl.toString());
-
 			} catch (error) {
 				res.status(500).send(`<html><body><h2>Error</h2><p>${error.message}</p></body></html>`);
 			}
@@ -307,7 +311,6 @@ export default {
 
 		// Mobile logout endpoint 
 		router.post('/mobile-logout', async (req, res) => {
-			// (Isi kode logout tetap sama, tidak saya potong agar full code)
 			try {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.replace('Bearer ', '');
@@ -347,14 +350,220 @@ export default {
 
 		// Apple login endpoint 
 		router.post('/apple-token', async (req, res) => {
-			// (Isi kode apple token tetap sama)
-			// ...
+			const { identityToken, firstName, lastName } = req.body;
+			logger.info('🍎 Apple token exchange request received');
+
+			if (!identityToken) {
+				return res.status(400).json({
+					error: 'identityToken is required',
+					message: 'Apple identityToken must be provided in the request body'
+				});
+			}
+
+			try {
+				const clientID = 'com.forumbandung.app';
+
+				const verifyAppleToken = async (idToken) => {
+					const [headerB64, payloadB64, signatureB64] = idToken.split('.');
+					const header = JSON.parse(Buffer.from(headerB64, 'base64').toString());
+					const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString());
+
+					if (payload.iss !== 'https://appleid.apple.com') throw new Error('Invalid issuer');
+
+					const allowedAudiences = [clientID.toLowerCase(), 'host.exp.exponent'];
+					const actualAud = payload.aud.toLowerCase();
+
+					if (!allowedAudiences.includes(actualAud)) {
+						throw new Error('Invalid audience');
+					}
+
+					if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('Token expired');
+
+					const response = await fetch('https://appleid.apple.com/auth/keys');
+					const { keys } = await response.json();
+					const key = keys.find(k => k.kid === header.kid);
+					if (!key) throw new Error('Apple public key not found');
+
+					const keyObject = crypto.createPublicKey({ key: key, format: 'jwk' });
+					const verify = crypto.createVerify('RSA-SHA256');
+					verify.update(`${headerB64}.${payloadB64}`);
+
+					const isValid = verify.verify(keyObject, signatureB64, 'base64url');
+					if (!isValid) throw new Error('Invalid signature');
+
+					return payload;
+				};
+
+				const decodedToken = await verifyAppleToken(identityToken);
+				const { email, sub } = decodedToken;
+
+				if (!email) throw new Error('Apple token did not contain an email');
+
+				const { UsersService } = services;
+				const schema = await getSchema();
+				const usersService = new UsersService({ schema, knex: database });
+
+				const existingUsers = await usersService.readByQuery({ filter: { email: { _eq: email } } });
+
+				let userId;
+				let user;
+				if (existingUsers.length > 0) {
+					user = existingUsers[0];
+					userId = user.id;
+					if (!user.external_identifier) {
+						await usersService.updateOne(userId, { external_identifier: sub, provider: 'apple' });
+					}
+				} else {
+					userId = await usersService.createOne({
+						email,
+						first_name: firstName || 'Apple User',
+						last_name: lastName || '',
+						role: DEFAULT_ROLE_ID,
+						status: 'active',
+						provider: 'apple',
+						external_identifier: sub
+					});
+					user = await usersService.readOne(userId);
+				}
+
+				const payload = { id: userId, role: user.role || DEFAULT_ROLE_ID, app_access: true, admin_access: false };
+				const sessionToken = jwt.sign(payload, env.SECRET, { expiresIn: '7d', issuer: 'directus' });
+				const refreshTokenPayload = { id: userId, type: 'refresh' };
+				const refreshToken = jwt.sign(refreshTokenPayload, env.SECRET, { expiresIn: '30d', issuer: 'directus' });
+
+				res.json({
+					success: true,
+					data: { access_token: sessionToken, refresh_token: refreshToken, expires: 3600 * 24 * 7, user: user },
+					user_id: userId,
+					email: email,
+					provider: 'apple'
+				});
+			} catch (error) {
+				res.status(500).json({ error: error.message, message: 'Failed to verify Apple token' });
+			}
 		});
 
 		// WebView SSO Bridge 
 		router.get('/bridge', async (req, res) => {
-			// (Isi kode bridge tetap sama)
-			// ...
+			const { token, redirect_uri, redirect } = req.query;
+			const targetToken = token;
+			const targetRedirect = redirect_uri || redirect || '/';
+
+			if (!targetToken) return res.status(400).json({ error: 'Token required', message: 'No access token provided' });
+
+			try {
+				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+					headers: { 'Authorization': `Bearer ${targetToken}` },
+				});
+
+				if (!meResponse.ok) return res.status(401).json({ error: 'Invalid token' });
+
+				const userData = await meResponse.json();
+
+				res.cookie(SESSION_COOKIE_NAME, targetToken, {
+					httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN,
+					sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/',
+				});
+
+				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+					res.cookie(CORE_COOKIE_NAME, targetToken, {
+						httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN,
+						sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/',
+					});
+				}
+
+				return res.redirect(targetRedirect);
+			} catch (error) {
+				res.status(500).json({ error: 'Bridge failure', message: error.message });
+			}
+		});
+
+		// ==========================================
+		// 4. ENDPOINT FCM PUSH NOTIFICATIONS
+		// ==========================================
+		async function getGoogleAccessToken() {
+			const header = { alg: 'RS256', typ: 'JWT' };
+			const now = Math.floor(Date.now() / 1000);
+			const claim = {
+				iss: FCM_CLIENT_EMAIL,
+				scope: 'https://www.googleapis.com/auth/firebase.messaging',
+				aud: 'https://oauth2.googleapis.com/token',
+				exp: now + 3600,
+				iat: now
+			};
+
+			const encodeBase64Url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+			const signatureInput = `${encodeBase64Url(header)}.${encodeBase64Url(claim)}`;
+			const sign = crypto.createSign('RSA-SHA256');
+			sign.update(signatureInput);
+			const signature = sign.sign(FCM_PRIVATE_KEY, 'base64url');
+			const jwt = `${signatureInput}.${signature}`;
+
+			const response = await fetch('https://oauth2.googleapis.com/token', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
+			});
+
+			if (!response.ok) throw new Error('Gagal mendapatkan token Google OAuth');
+			const resData = await response.json();
+			return resData.access_token;
+		}
+
+		router.post('/send-fcm', async (req, res) => {
+			const authSecret = req.headers['x-fcm-secret'];
+			if (FCM_WEBHOOK_SECRET && authSecret !== FCM_WEBHOOK_SECRET) {
+				logger.warn('🚨 Percobaan akses FCM Endpoint ditolak (Secret tidak cocok/hilang)');
+				return res.status(401).json({ error: 'Unauthorized. Cek header x-fcm-secret.' });
+			}
+
+			if (!FCM_PROJECT_ID || !FCM_CLIENT_EMAIL || !FCM_PRIVATE_KEY) {
+				return res.status(500).json({ error: 'Kredensial FCM belum diatur di .env server.' });
+			}
+
+			const { tokens, title, body, metadata } = req.body;
+			if (!tokens || !Array.isArray(tokens) || tokens.length === 0) {
+				return res.status(400).json({ error: 'Payload harus memiliki array "tokens".' });
+			}
+
+			try {
+				const accessToken = await getGoogleAccessToken();
+				const results = [];
+
+				for (const token of tokens) {
+					const fcmPayload = {
+						message: {
+							token: token,
+							notification: {
+								title: title || "Notifikasi Baru",
+								body: body || "Anda menerima pesan."
+							},
+							data: {
+								routing_info: metadata ? JSON.stringify(metadata) : "{}"
+							}
+						}
+					};
+
+					const sendResponse = await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_PROJECT_ID}/messages:send`, {
+						method: 'POST',
+						headers: {
+							'Authorization': `Bearer ${accessToken}`,
+							'Content-Type': 'application/json'
+						},
+						body: JSON.stringify(fcmPayload)
+					});
+
+					const sendResult = await sendResponse.json();
+					results.push({ token, status: sendResponse.status, response: sendResult });
+				}
+
+				logger.info(`✅ Berhasil mengirim ${results.length} notifikasi FCM.`);
+				res.json({ success: true, sent_count: results.length, details: results });
+
+			} catch (error) {
+				logger.error('❌ Error mengirim notifikasi FCM:', error);
+				res.status(500).json({ error: error.message });
+			}
 		});
 	}
 };
