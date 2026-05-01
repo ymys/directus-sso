@@ -2,7 +2,7 @@
 	"name": "@ymys/directus-extension-sso",
 	"description": "Mobile OAuth proxy endpoints for Directus + Keycloak + Google",
 	"icon": "smartphone",
-	"version": "2.1.10",
+	"version": "2.2.11",
 	"keywords": [
 		"directus",
 		"directus-extension",
@@ -32,11 +32,20 @@
 		"LICENSE"
 	],
 	"directus:extension": {
-		"type": "endpoint",
-		"path": "dist/index.js",
-		"source": "src/index.js",
-		"host": "^11.0.0",
-		"id": "sso"
+		"type": "bundle",
+		"entries": [
+			{
+				"type": "endpoint",
+				"name": "sso",
+				"source": "src/index.js"
+			},
+			{
+				"type": "hook",
+				"name": "fcm-hook",
+				"source": "src/hook.js"
+			}
+		],
+		"host": "^11.0.0"
 	},
 	"scripts": {
 		"build": "directus-extension build",

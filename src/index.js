@@ -3,6 +3,7 @@ const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
+import { sendFCM } from './utils.js';
 
 export default {
 	id: 'sso',
@@ -481,34 +482,6 @@ export default {
 		// ==========================================
 		// 4. ENDPOINT FCM PUSH NOTIFICATIONS
 		// ==========================================
-		async function getGoogleAccessToken() {
-			const header = { alg: 'RS256', typ: 'JWT' };
-			const now = Math.floor(Date.now() / 1000);
-			const claim = {
-				iss: FCM_CLIENT_EMAIL,
-				scope: 'https://www.googleapis.com/auth/firebase.messaging',
-				aud: 'https://oauth2.googleapis.com/token',
-				exp: now + 3600,
-				iat: now
-			};
-
-			const encodeBase64Url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
-			const signatureInput = `${encodeBase64Url(header)}.${encodeBase64Url(claim)}`;
-			const sign = crypto.createSign('RSA-SHA256');
-			sign.update(signatureInput);
-			const signature = sign.sign(FCM_PRIVATE_KEY, 'base64url');
-			const jwt = `${signatureInput}.${signature}`;
-
-			const response = await fetch('https://oauth2.googleapis.com/token', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-				body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
-			});
-
-			if (!response.ok) throw new Error('Gagal mendapatkan token Google OAuth');
-			const resData = await response.json();
-			return resData.access_token;
-		}
 
 		router.post('/send-fcm', async (req, res) => {
 			const authSecret = req.headers['x-fcm-secret'];
@@ -517,49 +490,14 @@ export default {
 				return res.status(401).json({ error: 'Unauthorized. Cek header x-fcm-secret.' });
 			}
 
-			if (!FCM_PROJECT_ID || !FCM_CLIENT_EMAIL || !FCM_PRIVATE_KEY) {
-				return res.status(500).json({ error: 'Kredensial FCM belum diatur di .env server.' });
-			}
-
 			const { tokens, title, body, metadata } = req.body;
 			if (!tokens || !Array.isArray(tokens) || tokens.length === 0) {
 				return res.status(400).json({ error: 'Payload harus memiliki array "tokens".' });
 			}
 
 			try {
-				const accessToken = await getGoogleAccessToken();
-				const results = [];
-
-				for (const token of tokens) {
-					const fcmPayload = {
-						message: {
-							token: token,
-							notification: {
-								title: title || "Notifikasi Baru",
-								body: body || "Anda menerima pesan."
-							},
-							data: {
-								routing_info: metadata ? JSON.stringify(metadata) : "{}"
-							}
-						}
-					};
-
-					const sendResponse = await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_PROJECT_ID}/messages:send`, {
-						method: 'POST',
-						headers: {
-							'Authorization': `Bearer ${accessToken}`,
-							'Content-Type': 'application/json'
-						},
-						body: JSON.stringify(fcmPayload)
-					});
-
-					const sendResult = await sendResponse.json();
-					results.push({ token, status: sendResponse.status, response: sendResult });
-				}
-
-				logger.info(`✅ Berhasil mengirim ${results.length} notifikasi FCM.`);
+				const results = await sendFCM(env, { tokens, title, body, metadata, logger });
 				res.json({ success: true, sent_count: results.length, details: results });
-
 			} catch (error) {
 				logger.error('❌ Error mengirim notifikasi FCM:', error);
 				res.status(500).json({ error: error.message });
