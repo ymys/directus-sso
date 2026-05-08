@@ -3,7 +3,6 @@ const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import { sendFCM } from './utils.js';
 
 export default {
 	id: 'sso',
@@ -43,13 +42,8 @@ export default {
 		const FCM_PRIVATE_KEY = env.FCM_PRIVATE_KEY ? env.FCM_PRIVATE_KEY.replace(/\\n/g, '\n') : null;
 		const FCM_WEBHOOK_SECRET = env.FCM_WEBHOOK_SECRET || null;
 
-		logger.info('🚀 Mobile Auth & FCM Proxy Extension loaded');
+		logger.info('🚀 Mobile Auth Extension loaded');
 		logger.info('📱 Allowed Mobile App Schemes: ' + ALLOWED_SCHEMES.join(', '));
-		if (FCM_PROJECT_ID && FCM_PRIVATE_KEY) {
-			logger.info('🔔 FCM Module: ENABLED for project ' + FCM_PROJECT_ID);
-		} else {
-			logger.warn('⚠️ FCM Module: DISABLED (Missing Credentials in .env)');
-		}
 
 		// ==========================================
 		// 2. HELPER FUNCTIONS SSO
@@ -362,7 +356,7 @@ export default {
 			}
 
 			try {
-				const clientID = 'com.forumbandung.app';
+				const clientID = env.APPLE_CLIENT_ID || 'com.forumbandung.app';
 
 				const verifyAppleToken = async (idToken) => {
 					const [headerB64, payloadB64, signatureB64] = idToken.split('.');
@@ -479,29 +473,5 @@ export default {
 			}
 		});
 
-		// ==========================================
-		// 4. ENDPOINT FCM PUSH NOTIFICATIONS
-		// ==========================================
-
-		router.post('/send-fcm', async (req, res) => {
-			const authSecret = req.headers['x-fcm-secret'];
-			if (FCM_WEBHOOK_SECRET && authSecret !== FCM_WEBHOOK_SECRET) {
-				logger.warn('🚨 Percobaan akses FCM Endpoint ditolak (Secret tidak cocok/hilang)');
-				return res.status(401).json({ error: 'Unauthorized. Cek header x-fcm-secret.' });
-			}
-
-			const { tokens, title, body, metadata } = req.body;
-			if (!tokens || !Array.isArray(tokens) || tokens.length === 0) {
-				return res.status(400).json({ error: 'Payload harus memiliki array "tokens".' });
-			}
-
-			try {
-				const results = await sendFCM(env, { tokens, title, body, metadata, logger });
-				res.json({ success: true, sent_count: results.length, details: results });
-			} catch (error) {
-				logger.error('❌ Error mengirim notifikasi FCM:', error);
-				res.status(500).json({ error: error.message });
-			}
-		});
 	}
 };
