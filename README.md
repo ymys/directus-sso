@@ -60,11 +60,18 @@ COOKIE_SAME_SITE=lax
 SESSION_COOKIE_NAME=directus_session_token
 REFRESH_TOKEN_COOKIE_NAME=directus_refresh_token
 DEFAULT_ROLE_ID=your-default-role-uuid
+
+# Apple Configuration
+# Supports single ID or comma-separated list for multi-app setups
+APPLE_CLIENT_ID=net.goyong.irapat,com.finsnapmobile.app
 ```
 
 ### 🍎 Apple Authentication Note
 
-Unlike Google (which uses Directus's native settings), the **Apple Native Token Flow** (`/apple-token`) manages user creation within this extension. You **must** provide a `DEFAULT_ROLE_ID` in your environment variables to ensure new Apple users are assigned the correct permissions.
+Unlike Google (which uses Directus's native settings), the **Apple Native Token Flow** (`/apple-token`) manages user creation within this extension. 
+
+- **Multiple Client IDs**: You can specify multiple bundle IDs in `APPLE_CLIENT_ID` as a comma-separated list. This is useful if you have multiple mobile apps using the same backend.
+- **Permissions**: You **must** provide a `DEFAULT_ROLE_ID` in your environment variables to ensure new Apple users are assigned the correct permissions.
 
 ## 📱 Mobile Usage
 

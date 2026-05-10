@@ -27,6 +27,12 @@ export default {
 
 		const MOBILE_APP_CALLBACK_PATH = env.MOBILE_APP_CALLBACK_PATH || '/auth/callback';
 		const GOOGLE_CALLBACK_PATH = env.GOOGLE_CALLBACK_PATH || '/auth/callback/google';
+
+		// Apple Configuration
+		const rawAppleClientIds = env.APPLE_CLIENT_ID || 'com.forumbandung.app';
+		const APPLE_CLIENT_IDS = Array.isArray(rawAppleClientIds)
+			? rawAppleClientIds.map(id => String(id).trim().toLowerCase())
+			: String(rawAppleClientIds).split(',').map(id => id.trim().toLowerCase());
 		const KEYCLOAK_CLIENT_ID = env.KEYCLOAK_CLIENT_ID || 'admin-cli';
 		const COOKIE_DOMAIN = env.COOKIE_DOMAIN || null;
 		const COOKIE_SECURE = env.COOKIE_SECURE !== 'false';
@@ -356,8 +362,6 @@ export default {
 			}
 
 			try {
-				const clientID = env.APPLE_CLIENT_ID || 'com.forumbandung.app';
-
 				const verifyAppleToken = async (idToken) => {
 					const [headerB64, payloadB64, signatureB64] = idToken.split('.');
 					const header = JSON.parse(Buffer.from(headerB64, 'base64').toString());
@@ -365,11 +369,11 @@ export default {
 
 					if (payload.iss !== 'https://appleid.apple.com') throw new Error('Invalid issuer');
 
-					const allowedAudiences = [clientID.toLowerCase(), 'host.exp.exponent'];
+					const allowedAudiences = [...APPLE_CLIENT_IDS, 'host.exp.exponent'];
 					const actualAud = payload.aud.toLowerCase();
 
 					if (!allowedAudiences.includes(actualAud)) {
-						throw new Error('Invalid audience');
+						throw new Error(`Invalid audience: ${actualAud}. Allowed: ${allowedAudiences.join(', ')}`);
 					}
 
 					if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('Token expired');
