@@ -2,7 +2,7 @@
 	"name": "@ymys/directus-extension-sso",
 	"description": "Mobile OAuth proxy endpoints for Directus + Keycloak + Google + Apple",
 	"icon": "smartphone",
-	"version": "2.3.13",
+	"version": "2.3.14",
 	"keywords": [
 		"directus",
 		"directus-extension",

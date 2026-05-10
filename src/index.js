@@ -402,17 +402,39 @@ export default {
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
 
-				const existingUsers = await usersService.readByQuery({ filter: { email: { _eq: email } } });
+				// 1. First, try to find user by unique Apple ID (sub)
+				let existingUsers = await usersService.readByQuery({ 
+					filter: { 
+						_and: [
+							{ external_identifier: { _eq: sub } },
+							{ provider: { _eq: 'apple' } }
+						]
+					} 
+				});
+
+				let user = existingUsers.length > 0 ? existingUsers[0] : null;
+
+				// 2. If not found by Apple ID, try finding by email
+				if (!user) {
+					existingUsers = await usersService.readByQuery({ 
+						filter: { email: { _eq: email } } 
+					});
+					
+					if (existingUsers.length > 0) {
+						user = existingUsers[0];
+						// Link this existing email account to the Apple ID
+						await usersService.updateOne(user.id, { 
+							external_identifier: sub, 
+							provider: 'apple' 
+						});
+					}
+				}
 
 				let userId;
-				let user;
-				if (existingUsers.length > 0) {
-					user = existingUsers[0];
+				if (user) {
 					userId = user.id;
-					if (!user.external_identifier) {
-						await usersService.updateOne(userId, { external_identifier: sub, provider: 'apple' });
-					}
 				} else {
+					// 3. Create new user if not found by either
 					userId = await usersService.createOne({
 						email,
 						first_name: firstName || 'Apple User',
