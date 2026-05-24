@@ -237,9 +237,8 @@ export default {
         <div class="instruction-card">
             <h3>How to resolve this</h3>
             <ul class="instruction-list">
-                <li>Tap the <strong>✕</strong> close icon at the top left of this screen.</li>
-                <li>You will return to your mobile app automatically.</li>
-                <li>Try logging in again from the app.</li>
+                <li>Tap the <strong>✕</strong> close icon at the top left of this screen. Or simply close this page and try again.</li>
+                <li>Click the back button or gesture.</li>
             </ul>
         </div>
 
@@ -461,7 +460,7 @@ export default {
 		function getValidatedScheme(req) {
 			// 1. Try req.query.app_scheme
 			let requestedScheme = req.query.app_scheme;
-			
+
 			// 2. Try parsing from req.query.redirect_uri or req.query.redirect
 			if (!requestedScheme) {
 				const redirectUri = req.query.redirect_uri || req.query.redirect;
