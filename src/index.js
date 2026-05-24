@@ -449,7 +449,7 @@ export default {
 			logger.info('🛠️ SSO global error interceptor registered on Express app');
 
 			const errorInterceptor = (req, res, next) => {
-				const acceptsHtml = req.accepts('html') || req.headers.accept?.includes('text/html');
+				const acceptsHtml = (typeof req.accepts === 'function' && req.accepts('html')) || req.headers.accept?.includes('text/html');
 				const hasBrowserUA = /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
 				const isBrowser = acceptsHtml || hasBrowserUA;
 				if (isBrowser) {
@@ -464,7 +464,7 @@ export default {
 							
 							if (isInvalidCredentials) {
 								res.setHeader('Content-Type', 'text/html');
-								res.status(401);
+								if (typeof res.status === 'function') res.status(401);
 								return res.send(renderFriendlyErrorPage(
 									'Login Session Expired',
 									'Your login credentials are invalid or your session has expired. Please return to the app and try logging in again.',
@@ -481,11 +481,20 @@ export default {
 			// Let Express construct and register the Layer properly
 			app.use(errorInterceptor);
 
-			// Move it to the very beginning of the Express middleware stack so it runs before other handlers
+			// Move it immediately after expressInit in the Express stack so req/res are fully decorated
 			if (app._router && Array.isArray(app._router.stack)) {
 				const lastLayer = app._router.stack.pop();
 				if (lastLayer) {
-					app._router.stack.unshift(lastLayer);
+					const initIndex = app._router.stack.findIndex(layer => layer.name === 'expressInit');
+					if (initIndex !== -1) {
+						// Insert immediately after expressInit
+						app._router.stack.splice(initIndex + 1, 0, lastLayer);
+						logger.info(`🛠️ SSO error interceptor moved immediately after expressInit (index ${initIndex + 1})`);
+					} else {
+						// Fallback: insert at index 1 or 2
+						app._router.stack.splice(Math.min(2, app._router.stack.length), 0, lastLayer);
+						logger.info(`🛠️ SSO error interceptor moved to index ${Math.min(2, app._router.stack.length)} (fallback)`);
+					}
 				}
 			}
 		}
