@@ -449,7 +449,9 @@ export default {
 			logger.info('🛠️ SSO global error interceptor registered on Express app');
 
 			const errorInterceptor = (req, res, next) => {
-				const isBrowser = isBrowserRequest(req);
+				const acceptsHtml = req.accepts('html') || req.headers.accept?.includes('text/html');
+				const hasBrowserUA = /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
+				const isBrowser = acceptsHtml || hasBrowserUA;
 				if (isBrowser) {
 					// Override res.json to catch JSON error objects before they are sent
 					const originalJson = res.json;
@@ -476,18 +478,15 @@ export default {
 				next();
 			};
 
-			// Insert at the absolute beginning of the Express middleware stack so it runs before any routes or error handlers
+			// Let Express construct and register the Layer properly
+			app.use(errorInterceptor);
+
+			// Move it to the very beginning of the Express middleware stack so it runs before other handlers
 			if (app._router && Array.isArray(app._router.stack)) {
-				app._router.stack.unshift({
-					handle: errorInterceptor,
-					name: 'ssoErrorInterceptor',
-					params: undefined,
-					path: undefined,
-					keys: [],
-					regexp: /^\/?/,
-				});
-			} else {
-				app.use(errorInterceptor);
+				const lastLayer = app._router.stack.pop();
+				if (lastLayer) {
+					app._router.stack.unshift(lastLayer);
+				}
 			}
 		}
 
@@ -511,6 +510,7 @@ export default {
 		// Mobile callback endpoint
 		router.get('/mobile-callback', async (req, res) => {
 			const isBrowser = isBrowserRequest(req);
+			const isBrowserForError = req.accepts('html') || req.headers.accept?.includes('text/html') || /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
 			try {
 				let authResult = null;
 				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) authResult = await tryAllCookies(req, SESSION_COOKIE_NAME);
@@ -519,7 +519,7 @@ export default {
 				if (!authResult) authResult = await tryRefreshToken(req);
 
 				if (!authResult) {
-					if (isBrowser) {
+					if (isBrowserForError) {
 						res.setHeader('Content-Type', 'text/html');
 						return res.status(401).send(renderFriendlyErrorPage(
 							'Authentication Failed',
@@ -556,7 +556,7 @@ export default {
 				return res.status(302).send(`<html><head><meta http-equiv="refresh" content="0;url=${redirectUrl}"></head><body>Redirecting...</body></html>`);
 			} catch (error) {
 				logger.error('Error in mobile-callback:', error);
-				if (isBrowser) {
+				if (isBrowserForError) {
 					res.setHeader('Content-Type', 'text/html');
 					return res.status(500).send(renderFriendlyErrorPage(
 						'Authentication Error',
@@ -571,6 +571,7 @@ export default {
 		// Google callback endpoint
 		router.get('/google-callback', async (req, res) => {
 			const isBrowser = isBrowserRequest(req);
+			const isBrowserForError = req.accepts('html') || req.headers.accept?.includes('text/html') || /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
 			try {
 				let authResult = null;
 
@@ -595,7 +596,7 @@ export default {
 				if (!authResult) authResult = await tryRefreshToken(req);
 
 				if (!authResult) {
-					if (isBrowser) {
+					if (isBrowserForError) {
 						res.setHeader('Content-Type', 'text/html');
 						return res.status(401).send(renderFriendlyErrorPage(
 							'Authentication Failed',
@@ -637,7 +638,7 @@ export default {
 				return res.redirect(302, redirectUrl.toString());
 			} catch (error) {
 				logger.error('Error in google-callback:', error);
-				if (isBrowser) {
+				if (isBrowserForError) {
 					res.setHeader('Content-Type', 'text/html');
 					return res.status(500).send(renderFriendlyErrorPage(
 						'Authentication Error',
@@ -1024,6 +1025,7 @@ export default {
 
 			const ENABLE_LEGACY_BRIDGE = env.ENABLE_LEGACY_BRIDGE === 'true';
 			const isBrowser = isBrowserRequest(req);
+			const isBrowserForError = req.accepts('html') || req.headers.accept?.includes('text/html') || /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
 
 			let userId = null;
 			let finalToken = null;
@@ -1032,7 +1034,7 @@ export default {
 				try {
 					const decoded = jwt.verify(bridge_token, env.SECRET, { issuer: 'directus-sso' });
 					if (decoded.purpose !== 'bridge') {
-						if (isBrowser) {
+						if (isBrowserForError) {
 							res.setHeader('Content-Type', 'text/html');
 							return res.status(400).send(renderFriendlyErrorPage('Authentication Failed', 'Invalid token purpose.', 'INVALID_BRIDGE_TOKEN'));
 						}
@@ -1044,7 +1046,7 @@ export default {
 					const payload = { id: userId, app_access: true, admin_access: false };
 					finalToken = jwt.sign(payload, env.SECRET, { expiresIn: '7d', issuer: 'directus' });
 				} catch (err) {
-					if (isBrowser) {
+					if (isBrowserForError) {
 						res.setHeader('Content-Type', 'text/html');
 						return res.status(401).send(renderFriendlyErrorPage('Session Expired', 'Your secure login session has expired or is invalid. Please go back to the app and try logging in again.', 'EXPIRED_BRIDGE_TOKEN'));
 					}
@@ -1057,7 +1059,7 @@ export default {
 						headers: { 'Authorization': `Bearer ${token}` },
 					});
 					if (!meResponse.ok) {
-						if (isBrowser) {
+						if (isBrowserForError) {
 							res.setHeader('Content-Type', 'text/html');
 							return res.status(401).send(renderFriendlyErrorPage('Session Expired', 'Your secure login session has expired or is invalid. Please go back to the app and try logging in again.', 'INVALID_CREDENTIALS'));
 						}
@@ -1067,14 +1069,14 @@ export default {
 					userId = userData.data.id;
 					finalToken = token;
 				} catch (err) {
-					if (isBrowser) {
+					if (isBrowserForError) {
 						res.setHeader('Content-Type', 'text/html');
 						return res.status(500).send(renderFriendlyErrorPage('Authentication Error', 'An unexpected error occurred while bridging your session.', 'BRIDGE_FAILURE'));
 					}
 					return res.status(500).json({ error: 'Bridge failure', message: err.message });
 				}
 			} else {
-				if (isBrowser) {
+				if (isBrowserForError) {
 					res.setHeader('Content-Type', 'text/html');
 					return res.status(400).send(renderFriendlyErrorPage('Authentication Failed', 'Secure bridge token is required to start your session.', 'MISSING_BRIDGE_TOKEN'));
 				}
