@@ -57,6 +57,201 @@ export default {
 			});
 		}
 
+		// Helper to render a beautiful user-friendly error page
+		function renderFriendlyErrorPage(title, message, errorCode = 'AUTHENTICATION_FAILED') {
+			const escapedTitle = escapeHTML(title);
+			const escapedMessage = escapeHTML(message);
+			const escapedErrorCode = escapeHTML(errorCode);
+
+			return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${escapedTitle}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            color: #1e293b;
+        }
+        .container {
+            width: 100%;
+            max-width: 440px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.6);
+            border-radius: 24px;
+            padding: 40px 32px;
+            box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.08);
+            text-align: center;
+            animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        .icon-wrapper {
+            width: 72px;
+            height: 72px;
+            background: #fef2f2;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 24px;
+            color: #ef4444;
+            border: 1px solid #fee2e2;
+            animation: scaleIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        @keyframes scaleIn {
+            from { transform: scale(0); }
+            to { transform: scale(1); }
+        }
+        .icon {
+            width: 32px;
+            height: 32px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 12px;
+            letter-spacing: -0.02em;
+        }
+        p {
+            font-size: 15px;
+            line-height: 1.6;
+            color: #64748b;
+            margin-bottom: 32px;
+        }
+        .instruction-card {
+            background: #f8fafc;
+            border: 1px solid #f1f5f9;
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 28px;
+            text-align: left;
+        }
+        .instruction-card h3 {
+            font-size: 13px;
+            font-weight: 700;
+            color: #475569;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .instruction-list {
+            list-style: none;
+        }
+        .instruction-list li {
+            font-size: 14px;
+            line-height: 1.5;
+            color: #475569;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: flex-start;
+        }
+        .instruction-list li::before {
+            content: "•";
+            color: #ef4444;
+            font-weight: bold;
+            display: inline-block;
+            width: 1em;
+            margin-left: -0.2em;
+            flex-shrink: 0;
+        }
+        .instruction-list li:last-child {
+            margin-bottom: 0;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            padding: 14px 24px;
+            background: #0f172a;
+            color: #ffffff;
+            border: none;
+            border-radius: 16px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.1);
+            text-decoration: none;
+        }
+        .btn:hover {
+            background: #1e293b;
+            transform: translateY(-1px);
+            box-shadow: 0 10px 15px -3px rgba(15, 23, 42, 0.15);
+        }
+        .btn:active {
+            transform: translateY(0);
+        }
+        .footer-text {
+            font-size: 12px;
+            color: #94a3b8;
+            margin-top: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon-wrapper">
+            <svg class="icon" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+        </div>
+        <h1>${escapedTitle}</h1>
+        <p>${escapedMessage}</p>
+        
+        <div class="instruction-card">
+            <h3>How to resolve this</h3>
+            <ul class="instruction-list">
+                <li>Tap the <strong>✕</strong> close icon at the top left of this screen.</li>
+                <li>You will return to your mobile app automatically.</li>
+                <li>Try logging in again from the app.</li>
+            </ul>
+        </div>
+
+        <button class="btn" onclick="try { window.close(); } catch(e) {}">Return to App</button>
+        
+        <div class="footer-text">
+            Error Code: ${escapedErrorCode}
+        </div>
+    </div>
+</body>
+</html>`;
+		}
+
 		// Helper function to validate redirect URL to prevent open redirect
 		function getSafeRedirectUrl(url, fallback = '/') {
 			if (!url || typeof url !== 'string') return fallback;
@@ -243,6 +438,67 @@ export default {
 			return DEFAULT_SCHEME;
 		}
 
+		// Global error/JSON interceptor to capture any 401 INVALID_CREDENTIALS or auth errors
+		// returned by Directus core or external modules, and convert them to friendly HTML for browsers.
+		let interceptorRegistered = false;
+		function registerGlobalErrorInterceptor(app) {
+			if (interceptorRegistered || app.__sso_error_interceptor_registered) return;
+			app.__sso_error_interceptor_registered = true;
+			interceptorRegistered = true;
+
+			logger.info('🛠️ SSO global error interceptor registered on Express app');
+
+			const errorInterceptor = (req, res, next) => {
+				const isBrowser = isBrowserRequest(req);
+				if (isBrowser) {
+					// Override res.json to catch JSON error objects before they are sent
+					const originalJson = res.json;
+					res.json = function (body) {
+						if (body && body.errors && Array.isArray(body.errors) && body.errors.length > 0) {
+							const isInvalidCredentials = body.errors.some(e => 
+								e.extensions?.code === 'INVALID_CREDENTIALS' || 
+								e.message?.toLowerCase().includes('credentials')
+							);
+							
+							if (isInvalidCredentials) {
+								res.setHeader('Content-Type', 'text/html');
+								res.status(401);
+								return res.send(renderFriendlyErrorPage(
+									'Login Session Expired',
+									'Your login credentials are invalid or your session has expired. Please return to the app and try logging in again.',
+									'INVALID_CREDENTIALS'
+								));
+							}
+						}
+						return originalJson.apply(this, arguments);
+					};
+				}
+				next();
+			};
+
+			// Insert at the absolute beginning of the Express middleware stack so it runs before any routes or error handlers
+			if (app._router && Array.isArray(app._router.stack)) {
+				app._router.stack.unshift({
+					handle: errorInterceptor,
+					name: 'ssoErrorInterceptor',
+					params: undefined,
+					path: undefined,
+					keys: [],
+					regexp: /^\/?/,
+				});
+			} else {
+				app.use(errorInterceptor);
+			}
+		}
+
+		// Register on the first incoming request to the SSO extension
+		router.use((req, res, next) => {
+			if (req.app) {
+				registerGlobalErrorInterceptor(req.app);
+			}
+			next();
+		});
+
 		// ==========================================
 		// 3. ENDPOINTS API
 		// ==========================================
@@ -263,7 +519,15 @@ export default {
 				if (!authResult) authResult = await tryRefreshToken(req);
 
 				if (!authResult) {
-					return res.send(`<html><body><h2>Authentication Failed</h2></body></html>`);
+					if (isBrowser) {
+						res.setHeader('Content-Type', 'text/html');
+						return res.status(401).send(renderFriendlyErrorPage(
+							'Authentication Failed',
+							'Your login session is invalid or has expired. Please go back to the app and try logging in again.',
+							'INVALID_CREDENTIALS'
+						));
+					}
+					return res.status(401).json({ error: 'Authentication failed' });
 				}
 
 				const { token: sessionToken, userData } = authResult;
@@ -291,7 +555,16 @@ export default {
 				res.setHeader('Location', redirectUrl);
 				return res.status(302).send(`<html><head><meta http-equiv="refresh" content="0;url=${redirectUrl}"></head><body>Redirecting...</body></html>`);
 			} catch (error) {
-				res.status(500).send(`<html><body><h2>Error</h2><p>${error.message}</p></body></html>`);
+				logger.error('Error in mobile-callback:', error);
+				if (isBrowser) {
+					res.setHeader('Content-Type', 'text/html');
+					return res.status(500).send(renderFriendlyErrorPage(
+						'Authentication Error',
+						error.message || 'An unexpected error occurred during mobile authentication.',
+						'INTERNAL_SERVER_ERROR'
+					));
+				}
+				res.status(500).json({ error: error.message });
 			}
 		});
 
@@ -322,7 +595,15 @@ export default {
 				if (!authResult) authResult = await tryRefreshToken(req);
 
 				if (!authResult) {
-					return res.send(`<html><body><h2>Authentication Failed</h2></body></html>`);
+					if (isBrowser) {
+						res.setHeader('Content-Type', 'text/html');
+						return res.status(401).send(renderFriendlyErrorPage(
+							'Authentication Failed',
+							'Your Google login session is invalid or has expired. Please go back to the app and try logging in again.',
+							'INVALID_CREDENTIALS'
+						));
+					}
+					return res.status(401).json({ error: 'Authentication failed' });
 				}
 
 				const { token: sessionToken, userData } = authResult;
@@ -355,7 +636,16 @@ export default {
 				logger.info('🚀 Performing direct 302 redirect to app: ' + redirectUrl.toString());
 				return res.redirect(302, redirectUrl.toString());
 			} catch (error) {
-				res.status(500).send(`<html><body><h2>Error</h2><p>${error.message}</p></body></html>`);
+				logger.error('Error in google-callback:', error);
+				if (isBrowser) {
+					res.setHeader('Content-Type', 'text/html');
+					return res.status(500).send(renderFriendlyErrorPage(
+						'Authentication Error',
+						error.message || 'An unexpected error occurred during Google authentication.',
+						'INTERNAL_SERVER_ERROR'
+					));
+				}
+				res.status(500).json({ error: error.message });
 			}
 		});
 		// Clear session cookies and redirect
@@ -733,6 +1023,7 @@ export default {
 			const targetRedirect = getSafeRedirectUrl(redirect_uri || redirect, '/');
 
 			const ENABLE_LEGACY_BRIDGE = env.ENABLE_LEGACY_BRIDGE === 'true';
+			const isBrowser = isBrowserRequest(req);
 
 			let userId = null;
 			let finalToken = null;
@@ -741,6 +1032,10 @@ export default {
 				try {
 					const decoded = jwt.verify(bridge_token, env.SECRET, { issuer: 'directus-sso' });
 					if (decoded.purpose !== 'bridge') {
+						if (isBrowser) {
+							res.setHeader('Content-Type', 'text/html');
+							return res.status(400).send(renderFriendlyErrorPage('Authentication Failed', 'Invalid token purpose.', 'INVALID_BRIDGE_TOKEN'));
+						}
 						return res.status(400).json({ error: 'Invalid token purpose' });
 					}
 					userId = decoded.sub;
@@ -749,6 +1044,10 @@ export default {
 					const payload = { id: userId, app_access: true, admin_access: false };
 					finalToken = jwt.sign(payload, env.SECRET, { expiresIn: '7d', issuer: 'directus' });
 				} catch (err) {
+					if (isBrowser) {
+						res.setHeader('Content-Type', 'text/html');
+						return res.status(401).send(renderFriendlyErrorPage('Session Expired', 'Your secure login session has expired or is invalid. Please go back to the app and try logging in again.', 'EXPIRED_BRIDGE_TOKEN'));
+					}
 					return res.status(401).json({ error: 'Invalid or expired bridge token', message: err.message });
 				}
 			} else if (token && ENABLE_LEGACY_BRIDGE) {
@@ -757,14 +1056,28 @@ export default {
 					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
 						headers: { 'Authorization': `Bearer ${token}` },
 					});
-					if (!meResponse.ok) return res.status(401).json({ error: 'Invalid token' });
+					if (!meResponse.ok) {
+						if (isBrowser) {
+							res.setHeader('Content-Type', 'text/html');
+							return res.status(401).send(renderFriendlyErrorPage('Session Expired', 'Your secure login session has expired or is invalid. Please go back to the app and try logging in again.', 'INVALID_CREDENTIALS'));
+						}
+						return res.status(401).json({ error: 'Invalid token' });
+					}
 					const userData = await meResponse.json();
 					userId = userData.data.id;
 					finalToken = token;
 				} catch (err) {
+					if (isBrowser) {
+						res.setHeader('Content-Type', 'text/html');
+						return res.status(500).send(renderFriendlyErrorPage('Authentication Error', 'An unexpected error occurred while bridging your session.', 'BRIDGE_FAILURE'));
+					}
 					return res.status(500).json({ error: 'Bridge failure', message: err.message });
 				}
 			} else {
+				if (isBrowser) {
+					res.setHeader('Content-Type', 'text/html');
+					return res.status(400).send(renderFriendlyErrorPage('Authentication Failed', 'Secure bridge token is required to start your session.', 'MISSING_BRIDGE_TOKEN'));
+				}
 				return res.status(400).json({ error: 'Secure bridge token required' });
 			}
 
