@@ -537,13 +537,15 @@ export default {
 				logger.info(`[SSO] Soft-deleted user ${userId} → ${deletedEmail}, sessions cleared: ${deletedSessionsCount}, directus logout: ${directusLogoutOk}`);
 
 				// 5. Keycloak logout — ONLY if Keycloak is actually configured.
-				//    Skipped entirely for Google-only setups to avoid noisy admin token errors.
+				//    We check env.KEYCLOAK_URL directly (not the local constant which has a fallback).
+				//    If KEYCLOAK_URL is not in .env, env.KEYCLOAK_URL is undefined → falsy → skipped.
+				//    NOTE: env.KEYCLOAK_ADMIN_USER === 'admin' is NOT a reliable signal —
+				//    'admin' is the standard default Keycloak admin username for real setups.
 				const isKeycloakConfigured = !!(
 					env.KEYCLOAK_URL &&
 					env.KEYCLOAK_REALM &&
 					env.KEYCLOAK_ADMIN_USER &&
-					env.KEYCLOAK_ADMIN_PASSWORD &&
-					env.KEYCLOAK_ADMIN_USER !== 'admin'  // skip if using default placeholder
+					env.KEYCLOAK_ADMIN_PASSWORD
 				);
 
 				if (isKeycloakConfigured) {
