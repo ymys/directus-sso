@@ -469,39 +469,12 @@ export default {
 
 				logger.info(`[SSO] Deleting account for user: ${userId} (${userEmail})`);
 
-				// 2. FIRST: Invalidate all sessions BEFORE suspending the user.
-				//    Suspending first causes /auth/logout to fail (INVALID_CREDENTIALS),
-				//    which is exactly what was causing the browser re-login 401.
-
-				// 2a. Extract the session token from the JWT payload and delete it directly.
-				//     Querying by 'user' alone was returning 0 rows because Directus stores
-				//     sessions keyed by the token value itself.
-				let deletedSessionsCount = 0;
+				// 2. Call Directus /auth/logout FIRST — while the session is still active.
+				//    This is important: if we delete from DB first, /auth/logout returns 401
+				//    and can't clean up server-side state cleanly.
+				let directusLogoutOk = false;
 				try {
-					const decoded = jwt.decode(token);
-					const sessionToken = decoded?.session;
-					if (sessionToken) {
-						// Delete by the exact session token from the JWT payload
-						const byToken = await database('directus_sessions')
-							.where('token', sessionToken)
-							.delete();
-						deletedSessionsCount += byToken;
-						logger.info(`[SSO] Deleted ${byToken} session(s) by token for user ${userId}`);
-					}
-					// Also delete any remaining sessions for this user (belt & suspenders)
-					const byUser = await database('directus_sessions')
-						.where('user', userId)
-						.delete();
-					deletedSessionsCount += byUser;
-					logger.info(`[SSO] Deleted ${byUser} additional session(s) by user ID for ${userId}`);
-				} catch (sessionError) {
-					logger.error('[SSO] Error deleting sessions:', sessionError);
-				}
-
-				// 2b. Call Directus /auth/logout while the user is still active,
-				//     so Directus can cleanly invalidate the session on its side.
-				try {
-					await fetch(`${PUBLIC_URL}/auth/logout`, {
+					const logoutRes = await fetch(`${PUBLIC_URL}/auth/logout`, {
 						method: 'POST',
 						headers: {
 							'Authorization': `Bearer ${token}`,
@@ -509,13 +482,40 @@ export default {
 						},
 						body: JSON.stringify({}),
 					});
-					logger.info(`[SSO] Directus /auth/logout called successfully for user ${userId}`);
+					directusLogoutOk = logoutRes.ok || logoutRes.status === 204;
+					logger.info(`[SSO] Directus /auth/logout → ${logoutRes.status} for user ${userId}`);
 				} catch (logoutError) {
-					// Non-fatal: session rows already deleted above
-					logger.warn('[SSO] /auth/logout call failed (non-fatal):', logoutError.message);
+					logger.warn('[SSO] /auth/logout network error (non-fatal):', logoutError.message);
 				}
 
-				// 3. Now safe to suspend + anonymise the user record
+				// 3. Delete ALL remaining sessions for this user from the DB.
+				//    We do this after /auth/logout so that logout can run cleanly,
+				//    but we still purge everything to cover refresh tokens and other sessions.
+				let deletedSessionsCount = 0;
+				try {
+					// 3a. Delete by the exact session token embedded in the JWT
+					const decoded = jwt.decode(token);
+					const sessionToken = decoded?.session;
+					if (sessionToken) {
+						const byToken = await database('directus_sessions')
+							.where('token', sessionToken)
+							.delete();
+						deletedSessionsCount += byToken;
+						logger.info(`[SSO] Deleted ${byToken} session(s) by token for user ${userId}`);
+					}
+					// 3b. Delete any other sessions (refresh tokens, concurrent sessions)
+					const byUser = await database('directus_sessions')
+						.where('user', userId)
+						.delete();
+					deletedSessionsCount += byUser;
+					if (byUser > 0) {
+						logger.info(`[SSO] Deleted ${byUser} additional session(s) by user ID for ${userId}`);
+					}
+				} catch (sessionError) {
+					logger.error('[SSO] Error deleting sessions:', sessionError);
+				}
+
+				// 4. Suspend + anonymise the user record
 				const { UsersService } = services;
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
@@ -528,32 +528,53 @@ export default {
 					last_name: 'ACCOUNT',
 					status: 'suspended',
 					email: deletedEmail,
-					// Also clear the external_identifier so a new Google account
-					// with the same email can be registered without conflicts.
+					// Clear the external_identifier so a new Google/Apple account
+					// with the same email can re-register without conflicts.
 					external_identifier: null,
 					provider: 'default',
 				});
 
-				logger.info(`[SSO] Soft-deleted user ID ${userId} → email renamed to ${deletedEmail}, total sessions cleared: ${deletedSessionsCount}`);
+				logger.info(`[SSO] Soft-deleted user ${userId} → ${deletedEmail}, sessions cleared: ${deletedSessionsCount}, directus logout: ${directusLogoutOk}`);
 
-				// 4. Logout from Keycloak if applicable
-				try {
-					const adminToken = await getKeycloakAdminToken();
-					if (adminToken) {
-						const keycloakUserId = await getKeycloakUserId(adminToken, userEmail);
-						if (keycloakUserId) {
-							await logoutKeycloakUser(adminToken, keycloakUserId);
-							logger.info(`[SSO] Logged out user ${userEmail} from Keycloak`);
+				// 5. Keycloak logout — ONLY if Keycloak is actually configured.
+				//    Skipped entirely for Google-only setups to avoid noisy admin token errors.
+				const isKeycloakConfigured = !!(
+					env.KEYCLOAK_URL &&
+					env.KEYCLOAK_REALM &&
+					env.KEYCLOAK_ADMIN_USER &&
+					env.KEYCLOAK_ADMIN_PASSWORD &&
+					env.KEYCLOAK_ADMIN_USER !== 'admin'  // skip if using default placeholder
+				);
+
+				if (isKeycloakConfigured) {
+					try {
+						const adminToken = await getKeycloakAdminToken();
+						if (adminToken) {
+							const keycloakUserId = await getKeycloakUserId(adminToken, userEmail);
+							if (keycloakUserId) {
+								await logoutKeycloakUser(adminToken, keycloakUserId);
+								logger.info(`[SSO] Logged out user ${userEmail} from Keycloak`);
+							}
 						}
+					} catch (keycloakError) {
+						logger.error('[SSO] Keycloak logout error:', keycloakError);
 					}
-				} catch (keycloakError) {
-					logger.error('[SSO] Error during Keycloak logout:', keycloakError);
 				}
+
+				// 6. Return a browser_logout_url that the mobile app MUST open in the browser.
+				//    Rationale: Directus validates JWTs stateless-ly (signature + expiry only).
+				//    Even after session DB deletion, the browser still has the old JWT cookie.
+				//    Directus reads it, finds user=suspended, returns 401 INVALID_CREDENTIALS in ~3ms.
+				//    The ONLY fix is to clear the browser cookie by navigating to logout-clear,
+				//    which sets Set-Cookie: ...; Max-Age=0.
+				const browserLogoutUrl = `${PUBLIC_URL}/sso/logout-clear`;
 
 				return res.json({
 					success: true,
 					message: 'Account deleted successfully, sessions cleared.',
 					sessions_cleared: deletedSessionsCount,
+					// Mobile app must open this URL via WebBrowser to clear browser OAuth cookies
+					browser_logout_url: browserLogoutUrl,
 				});
 			} catch (error) {
 				logger.error('[SSO] Account deletion failed:', error);
@@ -561,7 +582,7 @@ export default {
 			}
 		});
 
-		// Apple login endpoint 
+		// Apple login endpoint
 		router.post('/apple-token', async (req, res) => {
 			const { identityToken, firstName, lastName } = req.body;
 			logger.info('🍎 Apple token exchange request received');
