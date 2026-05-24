@@ -62,7 +62,7 @@ export default {
 			const escapedTitle = escapeHTML(title);
 			const escapedMessage = escapeHTML(message);
 			const escapedErrorCode = escapeHTML(errorCode);
-			const escapedRedirectUrl = redirectUrl ? escapeHTML(redirectUrl) : '';
+			const jsRedirectUrl = JSON.stringify(redirectUrl || '');
 
 			return `<!DOCTYPE html>
 <html lang="en">
@@ -251,7 +251,7 @@ export default {
     </div>
 
     <script>
-        const redirectUrl = "${escapedRedirectUrl}";
+        const redirectUrl = ${jsRedirectUrl};
         const returnBtn = document.getElementById('returnBtn');
         
         function handleReturn() {
@@ -473,6 +473,15 @@ export default {
 				}
 			}
 
+			// 3. Try reading from raw req.headers.cookie manually in case cookie-parser hasn't executed
+			if (!requestedScheme && req.headers.cookie) {
+				const cookies = req.headers.cookie.split(';').map(c => c.trim());
+				const capturedCookie = cookies.find(c => c.startsWith('sso_captured_scheme='));
+				if (capturedCookie) {
+					requestedScheme = capturedCookie.split('=')[1];
+				}
+			}
+
 			if (requestedScheme && ALLOWED_SCHEMES.includes(requestedScheme)) {
 				return requestedScheme;
 			} else if (requestedScheme) {
@@ -492,6 +501,28 @@ export default {
 			logger.info('🛠️ SSO global error interceptor registered on Express app');
 
 			const errorInterceptor = (req, res, next) => {
+				// Capture and store the app scheme if it's passed in the query during login initiation
+				let schemeToCapture = req.query.app_scheme;
+				if (!schemeToCapture) {
+					const redirectUri = req.query.redirect_uri || req.query.redirect;
+					if (redirectUri && typeof redirectUri === 'string') {
+						const match = redirectUri.match(/^([a-zA-Z0-9+-.]+):\/\//);
+						if (match) {
+							schemeToCapture = match[1];
+						}
+					}
+				}
+				if (schemeToCapture && ALLOWED_SCHEMES.includes(schemeToCapture)) {
+					// Store it in a secure cookie for 15 minutes to survive OAuth redirects
+					res.cookie('sso_captured_scheme', schemeToCapture, {
+						httpOnly: true,
+						secure: COOKIE_SECURE,
+						sameSite: COOKIE_SAME_SITE,
+						maxAge: 15 * 60 * 1000, // 15 mins
+						path: '/',
+					});
+				}
+
 				const acceptsHtml = (typeof req.accepts === 'function' && req.accepts('html')) || req.headers.accept?.includes('text/html');
 				const hasBrowserUA = /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
 				const isBrowser = acceptsHtml || hasBrowserUA;
@@ -500,11 +531,11 @@ export default {
 					const originalJson = res.json;
 					res.json = function (body) {
 						if (body && body.errors && Array.isArray(body.errors) && body.errors.length > 0) {
-							const isInvalidCredentials = body.errors.some(e => 
-								e.extensions?.code === 'INVALID_CREDENTIALS' || 
+							const isInvalidCredentials = body.errors.some(e =>
+								e.extensions?.code === 'INVALID_CREDENTIALS' ||
 								e.message?.toLowerCase().includes('credentials')
 							);
-							
+
 							if (isInvalidCredentials) {
 								const scheme = getValidatedScheme(req);
 								const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
@@ -538,7 +569,7 @@ export default {
 									res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
 									res.clearCookie(CORE_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
 									res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
-								} catch (err) {}
+								} catch (err) { }
 
 								if (typeof res.status === 'function') res.status(401);
 								return res.send(renderFriendlyErrorPage(
@@ -796,7 +827,7 @@ export default {
 				res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
 				res.clearCookie(CORE_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
 				res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
-			} catch (err) {}
+			} catch (err) { }
 
 			let redirectUrl = req.query.redirect;
 			if (redirectUrl) {
@@ -1045,29 +1076,29 @@ export default {
 				const usersService = new UsersService({ schema, knex: database });
 
 				// 1. First, try to find user by unique Apple ID (sub)
-				let existingUsers = await usersService.readByQuery({ 
-					filter: { 
+				let existingUsers = await usersService.readByQuery({
+					filter: {
 						_and: [
 							{ external_identifier: { _eq: sub } },
 							{ provider: { _eq: 'apple' } }
 						]
-					} 
+					}
 				});
 
 				let user = existingUsers.length > 0 ? existingUsers[0] : null;
 
 				// 2. If not found by Apple ID, try finding by email
 				if (!user) {
-					existingUsers = await usersService.readByQuery({ 
-						filter: { email: { _eq: email } } 
+					existingUsers = await usersService.readByQuery({
+						filter: { email: { _eq: email } }
 					});
-					
+
 					if (existingUsers.length > 0) {
 						user = existingUsers[0];
 						// Link this existing email account to the Apple ID
-						await usersService.updateOne(user.id, { 
-							external_identifier: sub, 
-							provider: 'apple' 
+						await usersService.updateOne(user.id, {
+							external_identifier: sub,
+							provider: 'apple'
 						});
 					}
 				}
