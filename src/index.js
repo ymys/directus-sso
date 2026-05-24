@@ -42,6 +42,46 @@ export default {
 		const DEFAULT_ROLE_ID = env.DEFAULT_ROLE_ID || null;
 		const CORE_COOKIE_NAME = 'directus_session_token';
 
+		// Helper function to safely escape HTML characters
+		function escapeHTML(str) {
+			if (typeof str !== 'string') return '';
+			return str.replace(/[&<>"']/g, (m) => {
+				switch (m) {
+					case '&': return '&amp;';
+					case '<': return '&lt;';
+					case '>': return '&gt;';
+					case '"': return '&quot;';
+					case "'": return '&#039;';
+					default: return m;
+				}
+			});
+		}
+
+		// Helper function to validate redirect URL to prevent open redirect
+		function getSafeRedirectUrl(url, fallback = '/') {
+			if (!url || typeof url !== 'string') return fallback;
+
+			try {
+				// 1. Relative URL check: Must start with / and must NOT start with // or /\ 
+				if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) {
+					return url;
+				}
+
+				// 2. Absolute URL check: Must match the origin of PUBLIC_URL
+				const parsedUrl = new URL(url);
+				const allowedOrigin = new URL(PUBLIC_URL).origin;
+
+				if (parsedUrl.origin === allowedOrigin) {
+					return url;
+				}
+			} catch (e) {
+				// Fail silently and return fallback
+			}
+
+			logger.warn(`⚠️ Warning: Blocked potentially unsafe redirect URL: "${url}". Defaulting to fallback: "${fallback}"`);
+			return fallback;
+		}
+
 		// Konfigurasi FCM (Firebase Cloud Messaging)
 		const FCM_PROJECT_ID = env.FCM_PROJECT_ID || null;
 		const FCM_CLIENT_EMAIL = env.FCM_CLIENT_EMAIL || null;
@@ -234,6 +274,7 @@ export default {
 						res.cookie(CORE_COOKIE_NAME, '', { maxAge: 0, path: '/' });
 					}
 					let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
+					redirectTo = getSafeRedirectUrl(redirectTo, '/');
 					return res.redirect(redirectTo);
 				}
 
@@ -292,7 +333,9 @@ export default {
 						res.cookie(CORE_COOKIE_NAME, '', { maxAge: 0, path: '/' });
 					}
 					let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
-					return res.send(`<html><head><meta http-equiv="refresh" content="2;url=${redirectTo}"></head><body>Login Successful!</body></html>`);
+					redirectTo = getSafeRedirectUrl(redirectTo, '/');
+					const escapedRedirectTo = escapeHTML(redirectTo);
+					return res.send(`<html><head><meta http-equiv="refresh" content="2;url=${escapedRedirectTo}"></head><body>Login Successful!</body></html>`);
 				}
 
 				const scheme = getValidatedScheme(req);
@@ -308,6 +351,31 @@ export default {
 			} catch (error) {
 				res.status(500).send(`<html><body><h2>Error</h2><p>${error.message}</p></body></html>`);
 			}
+		});
+		// Clear session cookies and redirect
+		router.get('/logout-clear', (req, res) => {
+			const cookieOptions = {
+				httpOnly: true,
+				secure: COOKIE_SECURE,
+				domain: COOKIE_DOMAIN,
+				sameSite: COOKIE_SAME_SITE,
+				path: '/',
+			};
+
+			res.clearCookie(SESSION_COOKIE_NAME, cookieOptions);
+			if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+				res.clearCookie(CORE_COOKIE_NAME, cookieOptions);
+			}
+			res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptions);
+
+			let redirectUrl = req.query.redirect;
+			if (redirectUrl) {
+				redirectUrl = getSafeRedirectUrl(redirectUrl, '/');
+				logger.info(`🧹 Cleared cookies and redirecting to: ${redirectUrl}`);
+				return res.redirect(redirectUrl);
+			}
+			logger.info(`🧹 Cleared cookies successfully (no redirect provided)`);
+			return res.json({ success: true, message: 'Cookies cleared successfully' });
 		});
 
 		// Mobile logout endpoint 
@@ -464,39 +532,89 @@ export default {
 			}
 		});
 
-		// WebView SSO Bridge 
-		router.get('/bridge', async (req, res) => {
-			const { token, redirect_uri, redirect } = req.query;
-			const targetToken = token;
-			const targetRedirect = redirect_uri || redirect || '/';
-
-			if (!targetToken) return res.status(400).json({ error: 'Token required', message: 'No access token provided' });
-
+		// Generate short-lived signed bridge token
+		router.post('/bridge-token', async (req, res) => {
 			try {
+				const authHeader = req.headers.authorization;
+				const token = authHeader?.replace('Bearer ', '');
+				if (!token) return res.status(400).json({ error: 'No token provided' });
+
+				// Verify token against /users/me
 				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-					headers: { 'Authorization': `Bearer ${targetToken}` },
+					headers: { 'Authorization': `Bearer ${token}` },
 				});
 
 				if (!meResponse.ok) return res.status(401).json({ error: 'Invalid token' });
-
 				const userData = await meResponse.json();
 
-				res.cookie(SESSION_COOKIE_NAME, targetToken, {
+				// Mint a short-lived bridge JWT
+				const payload = {
+					sub: userData.data.id,
+					purpose: 'bridge',
+				};
+				const bridgeToken = jwt.sign(payload, env.SECRET, { expiresIn: '60s', issuer: 'directus-sso' });
+
+				res.json({ success: true, bridge_token: bridgeToken });
+			} catch (error) {
+				res.status(500).json({ error: error.message });
+			}
+		});
+
+		// WebView SSO Bridge 
+		router.get('/bridge', async (req, res) => {
+			const { token, bridge_token, redirect_uri, redirect } = req.query;
+			const targetRedirect = getSafeRedirectUrl(redirect_uri || redirect, '/');
+
+			const ENABLE_LEGACY_BRIDGE = env.ENABLE_LEGACY_BRIDGE === 'true';
+
+			let userId = null;
+			let finalToken = null;
+
+			if (bridge_token) {
+				try {
+					const decoded = jwt.verify(bridge_token, env.SECRET, { issuer: 'directus-sso' });
+					if (decoded.purpose !== 'bridge') {
+						return res.status(400).json({ error: 'Invalid token purpose' });
+					}
+					userId = decoded.sub;
+
+					// Generate a fresh session token for this user
+					const payload = { id: userId, app_access: true, admin_access: false };
+					finalToken = jwt.sign(payload, env.SECRET, { expiresIn: '7d', issuer: 'directus' });
+				} catch (err) {
+					return res.status(401).json({ error: 'Invalid or expired bridge token', message: err.message });
+				}
+			} else if (token && ENABLE_LEGACY_BRIDGE) {
+				logger.warn('⚠️ Warning: Legacy bridge token used. This flow is vulnerable to session fixation.');
+				try {
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+						headers: { 'Authorization': `Bearer ${token}` },
+					});
+					if (!meResponse.ok) return res.status(401).json({ error: 'Invalid token' });
+					const userData = await meResponse.json();
+					userId = userData.data.id;
+					finalToken = token;
+				} catch (err) {
+					return res.status(500).json({ error: 'Bridge failure', message: err.message });
+				}
+			} else {
+				return res.status(400).json({ error: 'Secure bridge token required' });
+			}
+
+			// Set cookies and redirect
+			res.cookie(SESSION_COOKIE_NAME, finalToken, {
+				httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN,
+				sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/',
+			});
+
+			if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+				res.cookie(CORE_COOKIE_NAME, finalToken, {
 					httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN,
 					sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/',
 				});
-
-				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-					res.cookie(CORE_COOKIE_NAME, targetToken, {
-						httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN,
-						sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/',
-					});
-				}
-
-				return res.redirect(targetRedirect);
-			} catch (error) {
-				res.status(500).json({ error: 'Bridge failure', message: error.message });
 			}
+
+			return res.redirect(targetRedirect);
 		});
 
 	}
