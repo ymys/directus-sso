@@ -58,10 +58,11 @@ export default {
 		}
 
 		// Helper to render a beautiful user-friendly error page
-		function renderFriendlyErrorPage(title, message, errorCode = 'AUTHENTICATION_FAILED') {
+		function renderFriendlyErrorPage(title, message, errorCode = 'AUTHENTICATION_FAILED', redirectUrl = null) {
 			const escapedTitle = escapeHTML(title);
 			const escapedMessage = escapeHTML(message);
 			const escapedErrorCode = escapeHTML(errorCode);
+			const escapedRedirectUrl = redirectUrl ? escapeHTML(redirectUrl) : '';
 
 			return `<!DOCTYPE html>
 <html lang="en">
@@ -242,12 +243,41 @@ export default {
             </ul>
         </div>
 
-        <button class="btn" onclick="try { window.close(); } catch(e) {}">Return to App</button>
+        <button class="btn" id="returnBtn">Return to App</button>
         
         <div class="footer-text">
             Error Code: ${escapedErrorCode}
         </div>
     </div>
+
+    <script>
+        const redirectUrl = "${escapedRedirectUrl}";
+        const returnBtn = document.getElementById('returnBtn');
+        
+        function handleReturn() {
+            if (redirectUrl) {
+                // Navigate via server-side 302 redirect to ensure SFSafariViewController / Chrome Custom Tabs intercept it and close
+                window.location.href = "/sso/return?redirect_uri=" + encodeURIComponent(redirectUrl);
+                
+                // Fallback: try direct deep link and close window after 2.5 seconds if 302 redirect fails
+                setTimeout(() => {
+                    window.location.href = redirectUrl;
+                    setTimeout(() => {
+                        try { window.close(); } catch(e) {}
+                    }, 1000);
+                }, 2500);
+            } else {
+                try { window.close(); } catch(e) {}
+            }
+        }
+        
+        returnBtn.addEventListener('click', handleReturn);
+        
+        // Auto-redirect after 2 seconds if redirectUrl is available
+        if (redirectUrl) {
+            setTimeout(handleReturn, 2000);
+        }
+    </script>
 </body>
 </html>`;
 		}
@@ -429,7 +459,20 @@ export default {
 		}
 
 		function getValidatedScheme(req) {
-			const requestedScheme = req.query.app_scheme;
+			// 1. Try req.query.app_scheme
+			let requestedScheme = req.query.app_scheme;
+			
+			// 2. Try parsing from req.query.redirect_uri or req.query.redirect
+			if (!requestedScheme) {
+				const redirectUri = req.query.redirect_uri || req.query.redirect;
+				if (redirectUri && typeof redirectUri === 'string') {
+					const match = redirectUri.match(/^([a-zA-Z0-9+-.]+):\/\//);
+					if (match) {
+						requestedScheme = match[1];
+					}
+				}
+			}
+
 			if (requestedScheme && ALLOWED_SCHEMES.includes(requestedScheme)) {
 				return requestedScheme;
 			} else if (requestedScheme) {
@@ -463,12 +506,46 @@ export default {
 							);
 							
 							if (isInvalidCredentials) {
+								const scheme = getValidatedScheme(req);
+								const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+								const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INVALID_CREDENTIALS&message=${encodeURIComponent(body.errors[0]?.message || '')}`;
+
 								res.setHeader('Content-Type', 'text/html');
+
+								// Clear all possible session cookies so the browser doesn't send them on next login attempts
+								const cookieOptionsBase = {
+									httpOnly: true,
+									secure: COOKIE_SECURE,
+									sameSite: COOKIE_SAME_SITE,
+									path: '/',
+								};
+								res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsBase);
+								if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+									res.clearCookie(CORE_COOKIE_NAME, cookieOptionsBase);
+								}
+								res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsBase);
+
+								if (COOKIE_DOMAIN) {
+									const cookieOptionsWithDomain = { ...cookieOptionsBase, domain: COOKIE_DOMAIN };
+									res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsWithDomain);
+									if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+										res.clearCookie(CORE_COOKIE_NAME, cookieOptionsWithDomain);
+									}
+									res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsWithDomain);
+								}
+
+								try {
+									res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+									res.clearCookie(CORE_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+									res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+								} catch (err) {}
+
 								if (typeof res.status === 'function') res.status(401);
 								return res.send(renderFriendlyErrorPage(
 									'Login Session Expired',
 									'Your login credentials are invalid or your session has expired. Please return to the app and try logging in again.',
-									'INVALID_CREDENTIALS'
+									'INVALID_CREDENTIALS',
+									errorRedirectUrl
 								));
 							}
 						}
@@ -516,6 +593,16 @@ export default {
 			res.json({ status: 'ok', service: 'directus-extension-sso', version, allowed_schemes: ALLOWED_SCHEMES, fcm_enabled: !!FCM_PROJECT_ID });
 		});
 
+		// Server-side redirect helper to reliably return to custom mobile app deep links
+		router.get('/return', (req, res) => {
+			const redirectUri = req.query.redirect_uri || req.query.redirect;
+			if (redirectUri) {
+				logger.info(`🔄 Server-side redirecting back to app via 302: ${redirectUri}`);
+				return res.redirect(302, redirectUri);
+			}
+			return res.status(400).send('Missing redirect_uri');
+		});
+
 		// Mobile callback endpoint
 		router.get('/mobile-callback', async (req, res) => {
 			const isBrowser = isBrowserRequest(req);
@@ -529,11 +616,16 @@ export default {
 
 				if (!authResult) {
 					if (isBrowserForError) {
+						const scheme = getValidatedScheme(req);
+						const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+						const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INVALID_CREDENTIALS&message=Authentication failed`;
+
 						res.setHeader('Content-Type', 'text/html');
 						return res.status(401).send(renderFriendlyErrorPage(
 							'Authentication Failed',
 							'Your login session is invalid or has expired. Please go back to the app and try logging in again.',
-							'INVALID_CREDENTIALS'
+							'INVALID_CREDENTIALS',
+							errorRedirectUrl
 						));
 					}
 					return res.status(401).json({ error: 'Authentication failed' });
@@ -566,11 +658,16 @@ export default {
 			} catch (error) {
 				logger.error('Error in mobile-callback:', error);
 				if (isBrowserForError) {
+					const scheme = getValidatedScheme(req);
+					const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+					const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INTERNAL_SERVER_ERROR&message=${encodeURIComponent(error.message)}`;
+
 					res.setHeader('Content-Type', 'text/html');
 					return res.status(500).send(renderFriendlyErrorPage(
 						'Authentication Error',
 						error.message || 'An unexpected error occurred during mobile authentication.',
-						'INTERNAL_SERVER_ERROR'
+						'INTERNAL_SERVER_ERROR',
+						errorRedirectUrl
 					));
 				}
 				res.status(500).json({ error: error.message });
@@ -606,11 +703,16 @@ export default {
 
 				if (!authResult) {
 					if (isBrowserForError) {
+						const scheme = getValidatedScheme(req);
+						const path = req.query.app_path || GOOGLE_CALLBACK_PATH;
+						const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INVALID_CREDENTIALS&message=Authentication failed`;
+
 						res.setHeader('Content-Type', 'text/html');
 						return res.status(401).send(renderFriendlyErrorPage(
 							'Authentication Failed',
 							'Your Google login session is invalid or has expired. Please go back to the app and try logging in again.',
-							'INVALID_CREDENTIALS'
+							'INVALID_CREDENTIALS',
+							errorRedirectUrl
 						));
 					}
 					return res.status(401).json({ error: 'Authentication failed' });
@@ -648,11 +750,16 @@ export default {
 			} catch (error) {
 				logger.error('Error in google-callback:', error);
 				if (isBrowserForError) {
+					const scheme = getValidatedScheme(req);
+					const path = req.query.app_path || GOOGLE_CALLBACK_PATH;
+					const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INTERNAL_SERVER_ERROR&message=${encodeURIComponent(error.message)}`;
+
 					res.setHeader('Content-Type', 'text/html');
 					return res.status(500).send(renderFriendlyErrorPage(
 						'Authentication Error',
 						error.message || 'An unexpected error occurred during Google authentication.',
-						'INTERNAL_SERVER_ERROR'
+						'INTERNAL_SERVER_ERROR',
+						errorRedirectUrl
 					));
 				}
 				res.status(500).json({ error: error.message });
@@ -1039,13 +1146,18 @@ export default {
 			let userId = null;
 			let finalToken = null;
 
+			// Generate deep link redirect URL on error
+			const scheme = getValidatedScheme(req);
+			const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+			const errorRedirectUrlBase = `${scheme}://${path.replace(/^\/+/, '')}`;
+
 			if (bridge_token) {
 				try {
 					const decoded = jwt.verify(bridge_token, env.SECRET, { issuer: 'directus-sso' });
 					if (decoded.purpose !== 'bridge') {
 						if (isBrowserForError) {
 							res.setHeader('Content-Type', 'text/html');
-							return res.status(400).send(renderFriendlyErrorPage('Authentication Failed', 'Invalid token purpose.', 'INVALID_BRIDGE_TOKEN'));
+							return res.status(400).send(renderFriendlyErrorPage('Authentication Failed', 'Invalid token purpose.', 'INVALID_BRIDGE_TOKEN', `${errorRedirectUrlBase}?error=INVALID_BRIDGE_TOKEN&message=Invalid token purpose`));
 						}
 						return res.status(400).json({ error: 'Invalid token purpose' });
 					}
@@ -1057,7 +1169,7 @@ export default {
 				} catch (err) {
 					if (isBrowserForError) {
 						res.setHeader('Content-Type', 'text/html');
-						return res.status(401).send(renderFriendlyErrorPage('Session Expired', 'Your secure login session has expired or is invalid. Please go back to the app and try logging in again.', 'EXPIRED_BRIDGE_TOKEN'));
+						return res.status(401).send(renderFriendlyErrorPage('Session Expired', 'Your secure login session has expired or is invalid. Please go back to the app and try logging in again.', 'EXPIRED_BRIDGE_TOKEN', `${errorRedirectUrlBase}?error=EXPIRED_BRIDGE_TOKEN&message=${encodeURIComponent(err.message)}`));
 					}
 					return res.status(401).json({ error: 'Invalid or expired bridge token', message: err.message });
 				}
@@ -1070,7 +1182,7 @@ export default {
 					if (!meResponse.ok) {
 						if (isBrowserForError) {
 							res.setHeader('Content-Type', 'text/html');
-							return res.status(401).send(renderFriendlyErrorPage('Session Expired', 'Your secure login session has expired or is invalid. Please go back to the app and try logging in again.', 'INVALID_CREDENTIALS'));
+							return res.status(401).send(renderFriendlyErrorPage('Session Expired', 'Your secure login session has expired or is invalid. Please go back to the app and try logging in again.', 'INVALID_CREDENTIALS', `${errorRedirectUrlBase}?error=INVALID_CREDENTIALS&message=Authentication failed`));
 						}
 						return res.status(401).json({ error: 'Invalid token' });
 					}
@@ -1080,14 +1192,14 @@ export default {
 				} catch (err) {
 					if (isBrowserForError) {
 						res.setHeader('Content-Type', 'text/html');
-						return res.status(500).send(renderFriendlyErrorPage('Authentication Error', 'An unexpected error occurred while bridging your session.', 'BRIDGE_FAILURE'));
+						return res.status(500).send(renderFriendlyErrorPage('Authentication Error', 'An unexpected error occurred while bridging your session.', 'BRIDGE_FAILURE', `${errorRedirectUrlBase}?error=BRIDGE_FAILURE&message=${encodeURIComponent(err.message)}`));
 					}
 					return res.status(500).json({ error: 'Bridge failure', message: err.message });
 				}
 			} else {
 				if (isBrowserForError) {
 					res.setHeader('Content-Type', 'text/html');
-					return res.status(400).send(renderFriendlyErrorPage('Authentication Failed', 'Secure bridge token is required to start your session.', 'MISSING_BRIDGE_TOKEN'));
+					return res.status(400).send(renderFriendlyErrorPage('Authentication Failed', 'Secure bridge token is required to start your session.', 'MISSING_BRIDGE_TOKEN', `${errorRedirectUrlBase}?error=MISSING_BRIDGE_TOKEN&message=Secure bridge token required`));
 				}
 				return res.status(400).json({ error: 'Secure bridge token required' });
 			}
