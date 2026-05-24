@@ -440,6 +440,84 @@ export default {
 			}
 		});
 
+		// Delete user account and clear all active sessions
+		router.post('/delete-account', async (req, res) => {
+			try {
+				const authHeader = req.headers.authorization;
+				const token = authHeader?.replace('Bearer ', '');
+				if (!token) return res.status(400).json({ error: 'No token provided' });
+
+				// 1. Verify user token and get their profile
+				let userId = null;
+				let userEmail = null;
+				try {
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+						headers: { 'Authorization': `Bearer ${token}` }
+					});
+					if (meResponse.ok) {
+						const userData = await meResponse.json();
+						userId = userData.data.id;
+						userEmail = userData.data.email;
+					}
+				} catch (error) {
+					logger.error('[SSO] Error verifying token during account deletion:', error);
+				}
+
+				if (!userId || !userEmail) {
+					return res.status(401).json({ error: 'Invalid or expired token' });
+				}
+
+				logger.info(`[SSO] Deleting account for user: ${userId} (${userEmail})`);
+
+				// 2. Transform email using timestamp prefix
+				const timestamp = Date.now();
+				const deletedEmail = `DELETED_${timestamp}_${userEmail}`;
+
+				// 3. Update user status to suspended and rename email / names using UsersService
+				const { UsersService } = services;
+				const schema = await getSchema();
+				const usersService = new UsersService({ schema, knex: database });
+
+				await usersService.updateOne(userId, {
+					first_name: 'DELETED',
+					last_name: 'ACCOUNT',
+					status: 'suspended',
+					email: deletedEmail
+				});
+
+				logger.info(`[SSO] Soft-deleted user ID ${userId} and updated email to ${deletedEmail}`);
+
+				// 4. Delete all active sessions for this user from the database
+				const deletedSessionsCount = await database('directus_sessions')
+					.where('user', userId)
+					.delete();
+
+				logger.info(`[SSO] Deleted ${deletedSessionsCount} active sessions for user ID ${userId}`);
+
+				// 5. Logout from Keycloak if applicable
+				try {
+					const adminToken = await getKeycloakAdminToken();
+					if (adminToken) {
+						const keycloakUserId = await getKeycloakUserId(adminToken, userEmail);
+						if (keycloakUserId) {
+							await logoutKeycloakUser(adminToken, keycloakUserId);
+							logger.info(`[SSO] Logged out user ${userEmail} from Keycloak`);
+						}
+					}
+				} catch (keycloakError) {
+					logger.error('[SSO] Error during Keycloak logout:', keycloakError);
+				}
+
+				return res.json({
+					success: true,
+					message: 'Account deleted successfully, sessions cleared.'
+				});
+			} catch (error) {
+				logger.error('[SSO] Account deletion failed:', error);
+				return res.status(500).json({ error: error.message, message: 'Failed to delete account' });
+			}
+		});
+
 		// Apple login endpoint 
 		router.post('/apple-token', async (req, res) => {
 			const { identityToken, firstName, lastName } = req.body;
