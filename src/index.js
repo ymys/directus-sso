@@ -469,32 +469,74 @@ export default {
 
 				logger.info(`[SSO] Deleting account for user: ${userId} (${userEmail})`);
 
-				// 2. Transform email using timestamp prefix
-				const timestamp = Date.now();
-				const deletedEmail = `DELETED_${timestamp}_${userEmail}`;
+				// 2. FIRST: Invalidate all sessions BEFORE suspending the user.
+				//    Suspending first causes /auth/logout to fail (INVALID_CREDENTIALS),
+				//    which is exactly what was causing the browser re-login 401.
 
-				// 3. Update user status to suspended and rename email / names using UsersService
+				// 2a. Extract the session token from the JWT payload and delete it directly.
+				//     Querying by 'user' alone was returning 0 rows because Directus stores
+				//     sessions keyed by the token value itself.
+				let deletedSessionsCount = 0;
+				try {
+					const decoded = jwt.decode(token);
+					const sessionToken = decoded?.session;
+					if (sessionToken) {
+						// Delete by the exact session token from the JWT payload
+						const byToken = await database('directus_sessions')
+							.where('token', sessionToken)
+							.delete();
+						deletedSessionsCount += byToken;
+						logger.info(`[SSO] Deleted ${byToken} session(s) by token for user ${userId}`);
+					}
+					// Also delete any remaining sessions for this user (belt & suspenders)
+					const byUser = await database('directus_sessions')
+						.where('user', userId)
+						.delete();
+					deletedSessionsCount += byUser;
+					logger.info(`[SSO] Deleted ${byUser} additional session(s) by user ID for ${userId}`);
+				} catch (sessionError) {
+					logger.error('[SSO] Error deleting sessions:', sessionError);
+				}
+
+				// 2b. Call Directus /auth/logout while the user is still active,
+				//     so Directus can cleanly invalidate the session on its side.
+				try {
+					await fetch(`${PUBLIC_URL}/auth/logout`, {
+						method: 'POST',
+						headers: {
+							'Authorization': `Bearer ${token}`,
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify({}),
+					});
+					logger.info(`[SSO] Directus /auth/logout called successfully for user ${userId}`);
+				} catch (logoutError) {
+					// Non-fatal: session rows already deleted above
+					logger.warn('[SSO] /auth/logout call failed (non-fatal):', logoutError.message);
+				}
+
+				// 3. Now safe to suspend + anonymise the user record
 				const { UsersService } = services;
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
+
+				const timestamp = Date.now();
+				const deletedEmail = `DELETED_${timestamp}_${userEmail}`;
 
 				await usersService.updateOne(userId, {
 					first_name: 'DELETED',
 					last_name: 'ACCOUNT',
 					status: 'suspended',
-					email: deletedEmail
+					email: deletedEmail,
+					// Also clear the external_identifier so a new Google account
+					// with the same email can be registered without conflicts.
+					external_identifier: null,
+					provider: 'default',
 				});
 
-				logger.info(`[SSO] Soft-deleted user ID ${userId} and updated email to ${deletedEmail}`);
+				logger.info(`[SSO] Soft-deleted user ID ${userId} → email renamed to ${deletedEmail}, total sessions cleared: ${deletedSessionsCount}`);
 
-				// 4. Delete all active sessions for this user from the database
-				const deletedSessionsCount = await database('directus_sessions')
-					.where('user', userId)
-					.delete();
-
-				logger.info(`[SSO] Deleted ${deletedSessionsCount} active sessions for user ID ${userId}`);
-
-				// 5. Logout from Keycloak if applicable
+				// 4. Logout from Keycloak if applicable
 				try {
 					const adminToken = await getKeycloakAdminToken();
 					if (adminToken) {
@@ -510,7 +552,8 @@ export default {
 
 				return res.json({
 					success: true,
-					message: 'Account deleted successfully, sessions cleared.'
+					message: 'Account deleted successfully, sessions cleared.',
+					sessions_cleared: deletedSessionsCount,
 				});
 			} catch (error) {
 				logger.error('[SSO] Account deletion failed:', error);
