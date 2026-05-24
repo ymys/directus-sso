@@ -62,6 +62,12 @@ export default {
 			if (!url || typeof url !== 'string') return fallback;
 
 			try {
+				// Allow deep link redirects for allowed mobile app schemes
+				const hasAppScheme = ALLOWED_SCHEMES.some(scheme => url.startsWith(`${scheme}://`));
+				if (hasAppScheme) {
+					return url;
+				}
+
 				// 1. Relative URL check: Must start with / and must NOT start with // or /\ 
 				if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) {
 					return url;
@@ -354,19 +360,36 @@ export default {
 		});
 		// Clear session cookies and redirect
 		router.get('/logout-clear', (req, res) => {
-			const cookieOptions = {
+			const cookieOptionsBase = {
 				httpOnly: true,
 				secure: COOKIE_SECURE,
-				domain: COOKIE_DOMAIN,
 				sameSite: COOKIE_SAME_SITE,
 				path: '/',
 			};
 
-			res.clearCookie(SESSION_COOKIE_NAME, cookieOptions);
+			// 1. Clear without domain (covers host-only cookies like adminfinx.goyong.in)
+			res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsBase);
 			if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-				res.clearCookie(CORE_COOKIE_NAME, cookieOptions);
+				res.clearCookie(CORE_COOKIE_NAME, cookieOptionsBase);
 			}
-			res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptions);
+			res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsBase);
+
+			// 2. Clear with configured COOKIE_DOMAIN (covers domain-level cookies)
+			if (COOKIE_DOMAIN) {
+				const cookieOptionsWithDomain = { ...cookieOptionsBase, domain: COOKIE_DOMAIN };
+				res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsWithDomain);
+				if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+					res.clearCookie(CORE_COOKIE_NAME, cookieOptionsWithDomain);
+				}
+				res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsWithDomain);
+			}
+
+			// 3. Clear with explicit parent domain just in case (.goyong.in)
+			try {
+				res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+				res.clearCookie(CORE_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+				res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+			} catch (err) {}
 
 			let redirectUrl = req.query.redirect;
 			if (redirectUrl) {
