@@ -12,8 +12,26 @@ export default {
 		// ==========================================
 		// 1. KONFIGURASI ENVIRONMENT
 		// ==========================================
-		const KEYCLOAK_URL = env.KEYCLOAK_URL || 'http://keycloak:8080';
-		const KEYCLOAK_REALM = env.KEYCLOAK_REALM || 'testing';
+		let parsedUrl = env.KEYCLOAK_URL;
+		let parsedRealm = env.KEYCLOAK_REALM;
+		if (env.AUTH_KEYCLOAK_ISSUER_URL) {
+			try {
+				const issuer = new URL(env.AUTH_KEYCLOAK_ISSUER_URL);
+				if (!parsedUrl) parsedUrl = issuer.origin;
+				if (!parsedRealm) {
+					const parts = issuer.pathname.split('/');
+					const realmIndex = parts.indexOf('realms');
+					if (realmIndex !== -1 && parts[realmIndex + 1]) {
+						parsedRealm = parts[realmIndex + 1];
+					}
+				}
+			} catch (e) {
+				logger.error('Error parsing AUTH_KEYCLOAK_ISSUER_URL:', e);
+			}
+		}
+
+		const KEYCLOAK_URL = parsedUrl || 'http://keycloak:8080';
+		const KEYCLOAK_REALM = parsedRealm || 'testing';
 		const KEYCLOAK_ADMIN_USER = env.KEYCLOAK_ADMIN_USER || 'admin';
 		const KEYCLOAK_ADMIN_PASSWORD = env.KEYCLOAK_ADMIN_PASSWORD || 'admin';
 		const PUBLIC_URL = env.PUBLIC_URL || 'http://localhost:8055';
@@ -33,7 +51,7 @@ export default {
 		const APPLE_CLIENT_IDS = Array.isArray(rawAppleClientIds)
 			? rawAppleClientIds.map(id => String(id).trim().toLowerCase())
 			: String(rawAppleClientIds).split(',').map(id => id.trim().toLowerCase());
-		const KEYCLOAK_CLIENT_ID = env.KEYCLOAK_CLIENT_ID || 'admin-cli';
+		const KEYCLOAK_CLIENT_ID = env.KEYCLOAK_CLIENT_ID || env.AUTH_KEYCLOAK_CLIENT_ID || 'admin-cli';
 		const COOKIE_DOMAIN = env.COOKIE_DOMAIN || null;
 		const COOKIE_SECURE = env.COOKIE_SECURE !== 'false';
 		const COOKIE_SAME_SITE = env.COOKIE_SAME_SITE || 'lax';
