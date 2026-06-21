@@ -534,8 +534,17 @@ export default {
 
 			if (requestedScheme && ALLOWED_SCHEMES.includes(requestedScheme)) {
 				return requestedScheme;
-			} else if (requestedScheme) {
-				logger.warn(`⚠️ Warning: App requested scheme '${requestedScheme}', but it is not in .env. Falling back to '${DEFAULT_SCHEME}'`);
+			}
+			
+			// Compatibility: Safely allow known legacy/custom app schemes (like portalpipq, paramarthaapp, finsnapp)
+			// to avoid breaking old apps even if they are not explicitly configured in .env
+			const safeLegacySchemes = ['portalpipq', 'portalpipq-dev', 'paramarthaapp', 'paramarthaapp-dev', 'finsnapp', 'portaldev'];
+			if (requestedScheme && safeLegacySchemes.includes(requestedScheme)) {
+				return requestedScheme;
+			}
+
+			if (requestedScheme) {
+				logger.warn(`⚠️ Warning: App requested scheme '${requestedScheme}', but it is not in .env or safe list. Falling back to '${DEFAULT_SCHEME}'`);
 			}
 			return DEFAULT_SCHEME;
 		}
@@ -982,8 +991,8 @@ export default {
 				const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
 				const redirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?access_token=${accessToken}&user_id=${userId}&email=${encodeURIComponent(userEmail || '')}`;
 
-				res.setHeader('Location', redirectUrl);
-				return res.status(302).send(`<html><head><meta http-equiv="refresh" content="0;url=${redirectUrl}"></head><body>Redirecting...</body></html>`);
+				logger.info(`🚀 Redirecting back to app via native 302: ${redirectUrl}`);
+				return res.redirect(302, redirectUrl);
 			} catch (error) {
 				logger.error('Error in mobile-callback:', error);
 				if (isBrowserForError) {
