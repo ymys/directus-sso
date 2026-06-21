@@ -9,9 +9,6 @@ export default {
 	handler: (router, context) => {
 		const { env, logger, services, database, getSchema } = context;
 
-		// Create a temporary database table to hold short-lived exchange codes for Keycloak tokens
-		// This avoids sending huge Keycloak JWT tokens in the redirect Location header (preventing Nginx 502 Bad Gateway)
-		// and bypasses the iOS WebView user-gesture blocking restriction for custom deep-link schemes.
 		async function ensureTempTable() {
 			try {
 				const hasTable = await database.schema.hasTable('sso_keycloak_tokens');
@@ -20,9 +17,18 @@ export default {
 						table.string('code').primary();
 						table.text('access_token');
 						table.text('refresh_token');
+						table.text('id_token');
 						table.timestamp('created_at').defaultTo(database.fn.now());
 					});
 					logger.info('💾 Created temporary table sso_keycloak_tokens');
+				} else {
+					const hasIdToken = await database.schema.hasColumn('sso_keycloak_tokens', 'id_token');
+					if (!hasIdToken) {
+						await database.schema.alterTable('sso_keycloak_tokens', (table) => {
+							table.text('id_token');
+						});
+						logger.info('💾 Added id_token column to sso_keycloak_tokens');
+					}
 				}
 			} catch (err) {
 				logger.error('⚠️ Failed to ensure sso_keycloak_tokens table:', err);
@@ -748,6 +754,7 @@ export default {
 				const tokens = await tokenResponse.json();
 				const keycloakAccessToken = tokens.access_token;
 				const keycloakRefreshToken = tokens.refresh_token;
+				const keycloakIdToken = tokens.id_token || '';
 
 				if (!keycloakAccessToken) {
 					throw new Error('No access_token returned by Keycloak');
@@ -839,7 +846,8 @@ export default {
 				await database('sso_keycloak_tokens').insert({
 					code: keycloakCode,
 					access_token: keycloakAccessToken,
-					refresh_token: keycloakRefreshToken || ''
+					refresh_token: keycloakRefreshToken || '',
+					id_token: keycloakIdToken || ''
 				});
 
 				// Construct redirect URL back to the mobile app with Directus tokens and the exchange code
@@ -915,7 +923,8 @@ export default {
 				return res.json({
 					success: true,
 					access_token: row.access_token,
-					refresh_token: row.refresh_token
+					refresh_token: row.refresh_token,
+					id_token: row.id_token || ''
 				});
 			} catch (error) {
 				logger.error('❌ Error exchanging Keycloak token code:', error);
