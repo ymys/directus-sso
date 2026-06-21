@@ -825,9 +825,78 @@ export default {
 					path: '/',
 				});
 
-				logger.info(`🚀 Keycloak login successful. Redirecting back to mobile app: ${redirectUrl.toString()}`);
-				res.setHeader('Location', redirectUrl.toString());
-				return res.status(302).send(`<html><head><meta http-equiv="refresh" content="0;url=${redirectUrl.toString()}"></head><body>Redirecting to app...</body></html>`);
+				logger.info(`🚀 Keycloak login successful. Sending HTML deep-link redirect page...`);
+				
+				// We return HTTP 200 with an HTML landing page that triggers the redirect client-side.
+				// This avoids "upstream sent too big header" (502 Bad Gateway) errors in Nginx caused by the large Keycloak JWT tokens in the Location header.
+				res.setHeader('Content-Type', 'text/html');
+				return res.status(200).send(`
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Redirecting...</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #f8fafc;
+            margin: 0;
+        }
+        .card {
+            background: white;
+            padding: 32px;
+            border-radius: 16px;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+            text-align: center;
+            max-width: 360px;
+        }
+        h2 { color: #10b981; margin: 0 0 8px 0; }
+        p { color: #64748b; margin: 0 0 24px 0; }
+        .spinner {
+            border: 3px solid #f1f5f9;
+            border-top: 3px solid #10b981;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 24px auto;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background-color: #10b981;
+            color: white !important;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="spinner"></div>
+        <h2>Sinkronisasi Berhasil</h2>
+        <p>Mengalihkan kembali ke aplikasi Paramartha...</p>
+        <a href="${redirectUrl.toString()}" class="btn">Kembali ke Aplikasi</a>
+    </div>
+    <script>
+        // Trigger redirect instantly
+        window.location.replace("${redirectUrl.toString()}");
+        
+        // Fallback redirect on click
+        document.querySelector('.btn').addEventListener('click', function() {
+            window.location.href = "${redirectUrl.toString()}";
+        });
+    </script>
+</body>
+</html>
+				`);
 			} catch (error) {
 				logger.error('❌ Error in keycloak-callback:', error);
 				
