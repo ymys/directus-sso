@@ -3,11 +3,28 @@ const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
+import { getShared } from './shared.js';
 
 export default {
 	id: 'sso',
 	handler: (router, context) => {
 		const { env, logger, services, database, getSchema } = context;
+
+		const {
+			ALLOWED_SCHEMES,
+			DEFAULT_SCHEME,
+			PUBLIC_URL,
+			COOKIE_SECURE,
+			COOKIE_SAME_SITE,
+			SESSION_COOKIE_NAME,
+			REFRESH_TOKEN_COOKIE_NAME,
+			CORE_COOKIE_NAME,
+			COOKIE_DOMAIN,
+			MOBILE_APP_CALLBACK_PATH,
+			getValidatedScheme,
+			escapeHTML,
+			renderFriendlyErrorPage
+		} = getShared(env);
 
 		async function ensureTempTable() {
 			try {
@@ -37,7 +54,7 @@ export default {
 		ensureTempTable();
 
 		// ==========================================
-		// 1. KONFIGURASI ENVIRONMENT
+		// 1. KONFIGURASI ENVIRONMENT KEYCLOAK
 		// ==========================================
 		let parsedUrl = env.KEYCLOAK_URL;
 		let parsedRealm = env.KEYCLOAK_REALM;
@@ -61,7 +78,6 @@ export default {
 		const KEYCLOAK_REALM = parsedRealm || 'testing';
 		const KEYCLOAK_ADMIN_USER = env.KEYCLOAK_ADMIN_USER || 'admin';
 		const KEYCLOAK_ADMIN_PASSWORD = env.KEYCLOAK_ADMIN_PASSWORD || 'admin';
-		const PUBLIC_URL = env.PUBLIC_URL || 'http://localhost:8055';
 
 		const isKeycloakAdminConfigured = !!(
 			(env.KEYCLOAK_URL || env.AUTH_KEYCLOAK_ISSUER_URL) &&
@@ -69,14 +85,6 @@ export default {
 			env.KEYCLOAK_ADMIN_PASSWORD
 		);
 
-		// Multi-App Scheme
-		const rawSchemes = env.MOBILE_APP_SCHEME || 'finsnapp';
-		const ALLOWED_SCHEMES = Array.isArray(rawSchemes)
-			? rawSchemes.map(s => String(s).trim())
-			: String(rawSchemes).split(',').map(s => s.trim());
-		const DEFAULT_SCHEME = ALLOWED_SCHEMES[0];
-
-		const MOBILE_APP_CALLBACK_PATH = env.MOBILE_APP_CALLBACK_PATH || '/auth/callback';
 		const GOOGLE_CALLBACK_PATH = env.GOOGLE_CALLBACK_PATH || '/auth/callback/google';
 
 		// Apple Configuration
@@ -85,291 +93,12 @@ export default {
 			? rawAppleClientIds.map(id => String(id).trim().toLowerCase())
 			: String(rawAppleClientIds).split(',').map(id => id.trim().toLowerCase());
 		const KEYCLOAK_CLIENT_ID = env.KEYCLOAK_CLIENT_ID || env.AUTH_KEYCLOAK_CLIENT_ID || 'admin-cli';
-		const COOKIE_DOMAIN = env.COOKIE_DOMAIN || null;
-		const COOKIE_SECURE = env.COOKIE_SECURE !== 'false';
-		const COOKIE_SAME_SITE = env.COOKIE_SAME_SITE || 'lax';
-		const SESSION_COOKIE_NAME = env.SESSION_COOKIE_NAME || 'directus_session_token';
-		const REFRESH_TOKEN_COOKIE_NAME = env.REFRESH_TOKEN_COOKIE_NAME || 'directus_refresh_token';
 		const DEFAULT_ROLE_ID = env.DEFAULT_ROLE_ID || null;
-		const CORE_COOKIE_NAME = 'directus_session_token';
-
-		// Helper function to safely escape HTML characters
-		function escapeHTML(str) {
-			if (typeof str !== 'string') return '';
-			return str.replace(/[&<>"']/g, (m) => {
-				switch (m) {
-					case '&': return '&amp;';
-					case '<': return '&lt;';
-					case '>': return '&gt;';
-					case '"': return '&quot;';
-					case "'": return '&#039;';
-					default: return m;
-				}
-			});
-		}
-
-		// Helper to render a beautiful user-friendly error page
-		function renderFriendlyErrorPage(title, message, errorCode = 'AUTHENTICATION_FAILED', redirectUrl = null) {
-			const escapedTitle = escapeHTML(title);
-			const escapedMessage = escapeHTML(message);
-			const escapedErrorCode = escapeHTML(errorCode);
-			const jsRedirectUrl = JSON.stringify(redirectUrl || '');
-
-			return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${escapedTitle}</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-        body {
-            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 24px;
-            color: #1e293b;
-        }
-        .container {
-            width: 100%;
-            max-width: 440px;
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.6);
-            border-radius: 24px;
-            padding: 40px 32px;
-            box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.08);
-            text-align: center;
-            animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        .icon-wrapper {
-            width: 72px;
-            height: 72px;
-            background: #fef2f2;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 24px;
-            color: #ef4444;
-            border: 1px solid #fee2e2;
-            animation: scaleIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
-        }
-        @keyframes scaleIn {
-            from { transform: scale(0); }
-            to { transform: scale(1); }
-        }
-        .icon {
-            width: 32px;
-            height: 32px;
-            fill: none;
-            stroke: currentColor;
-            stroke-width: 2.5;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-        h1 {
-            font-size: 24px;
-            font-weight: 700;
-            color: #0f172a;
-            margin-bottom: 12px;
-            letter-spacing: -0.02em;
-        }
-        p {
-            font-size: 15px;
-            line-height: 1.6;
-            color: #64748b;
-            margin-bottom: 32px;
-        }
-        .instruction-card {
-            background: #f8fafc;
-            border: 1px solid #f1f5f9;
-            border-radius: 16px;
-            padding: 20px;
-            margin-bottom: 28px;
-            text-align: left;
-        }
-        .instruction-card h3 {
-            font-size: 13px;
-            font-weight: 700;
-            color: #475569;
-            margin-bottom: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-        .instruction-list {
-            list-style: none;
-        }
-        .instruction-list li {
-            font-size: 14px;
-            line-height: 1.5;
-            color: #475569;
-            margin-bottom: 10px;
-            display: flex;
-            align-items: flex-start;
-        }
-        .instruction-list li::before {
-            content: "•";
-            color: #ef4444;
-            font-weight: bold;
-            display: inline-block;
-            width: 1em;
-            margin-left: -0.2em;
-            flex-shrink: 0;
-        }
-        .instruction-list li:last-child {
-            margin-bottom: 0;
-        }
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 100%;
-            padding: 14px 24px;
-            background: #0f172a;
-            color: #ffffff;
-            border: none;
-            border-radius: 16px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            box-shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.1);
-            text-decoration: none;
-        }
-        .btn:hover {
-            background: #1e293b;
-            transform: translateY(-1px);
-            box-shadow: 0 10px 15px -3px rgba(15, 23, 42, 0.15);
-        }
-        .btn:active {
-            transform: translateY(0);
-        }
-        .footer-text {
-            font-size: 12px;
-            color: #94a3b8;
-            margin-top: 24px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="icon-wrapper">
-            <svg class="icon" viewBox="0 0 24 24">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-        </div>
-        <h1>${escapedTitle}</h1>
-        <p>${escapedMessage}</p>
-        
-        <div class="instruction-card">
-            <h3>How to resolve this</h3>
-            <ul class="instruction-list">
-                <li>Tap the <strong>✕</strong> close icon at the top left of this screen. Or simply close this page and try again.</li>
-                <li>Click the back button or gesture.</li>
-            </ul>
-        </div>
-
-        <button class="btn" id="returnBtn">Return to App</button>
-        
-        <div class="footer-text">
-            Error Code: ${escapedErrorCode}
-        </div>
-    </div>
-
-    <script>
-        const redirectUrl = ${jsRedirectUrl};
-        const returnBtn = document.getElementById('returnBtn');
-        
-        function handleReturn() {
-            if (redirectUrl) {
-                // Navigate via server-side 302 redirect to ensure SFSafariViewController / Chrome Custom Tabs intercept it and close
-                window.location.href = "/sso/return?redirect_uri=" + encodeURIComponent(redirectUrl);
-                
-                // Fallback: try direct deep link and close window after 2.5 seconds if 302 redirect fails
-                setTimeout(() => {
-                    window.location.href = redirectUrl;
-                    setTimeout(() => {
-                        try { window.close(); } catch(e) {}
-                    }, 1000);
-                }, 2500);
-            } else {
-                try { window.close(); } catch(e) {}
-            }
-        }
-        
-        returnBtn.addEventListener('click', handleReturn);
-        
-        // Auto-redirect after 2 seconds if redirectUrl is available
-        if (redirectUrl) {
-            setTimeout(handleReturn, 2000);
-        }
-    </script>
-</body>
-</html>`;
-		}
-
-		// Helper function to validate redirect URL to prevent open redirect
-		function getSafeRedirectUrl(url, fallback = '/') {
-			if (!url || typeof url !== 'string') return fallback;
-
-			try {
-				// Allow deep link redirects for allowed mobile app schemes
-				const hasAppScheme = ALLOWED_SCHEMES.some(scheme => url.startsWith(`${scheme}://`));
-				if (hasAppScheme) {
-					return url;
-				}
-
-				// 1. Relative URL check: Must start with / and must NOT start with // or /\ 
-				if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) {
-					return url;
-				}
-
-				// 2. Absolute URL check: Must match the origin of PUBLIC_URL
-				const parsedUrl = new URL(url);
-				const allowedOrigin = new URL(PUBLIC_URL).origin;
-
-				if (parsedUrl.origin === allowedOrigin) {
-					return url;
-				}
-			} catch (e) {
-				// Fail silently and return fallback
-			}
-
-			logger.warn(`⚠️ Warning: Blocked potentially unsafe redirect URL: "${url}". Defaulting to fallback: "${fallback}"`);
-			return fallback;
-		}
 
 		// Konfigurasi FCM (Firebase Cloud Messaging)
 		const FCM_PROJECT_ID = env.FCM_PROJECT_ID || null;
-		const FCM_CLIENT_EMAIL = env.FCM_CLIENT_EMAIL || null;
-		const FCM_PRIVATE_KEY = env.FCM_PRIVATE_KEY ? env.FCM_PRIVATE_KEY.replace(/\\n/g, '\n') : null;
-		const FCM_WEBHOOK_SECRET = env.FCM_WEBHOOK_SECRET || null;
 
-		logger.info('🚀 Mobile Auth Extension loaded');
+		logger.info('🚀 Mobile Auth Extension Endpoint loaded');
 		logger.info('📱 Allowed Mobile App Schemes: ' + ALLOWED_SCHEMES.join(', '));
 
 		// ==========================================
@@ -508,171 +237,33 @@ export default {
 			return null;
 		}
 
-		function getValidatedScheme(req) {
-			// 1. Try req.query.app_scheme
-			let requestedScheme = req.query.app_scheme;
+		// Helper function to validate redirect URL to prevent open redirect
+		function getSafeRedirectUrl(url, fallback = '/') {
+			if (!url || typeof url !== 'string') return fallback;
 
-			// 2. Try parsing from req.query.redirect_uri or req.query.redirect
-			if (!requestedScheme) {
-				const redirectUri = req.query.redirect_uri || req.query.redirect;
-				if (redirectUri && typeof redirectUri === 'string') {
-					const match = redirectUri.match(/^([a-zA-Z0-9+-.]+):\/\//);
-					if (match) {
-						requestedScheme = match[1];
-					}
+			try {
+				const hasAppScheme = ALLOWED_SCHEMES.some(scheme => url.startsWith(`${scheme}://`));
+				if (hasAppScheme) {
+					return url;
 				}
-			}
 
-			// 3. Try reading from raw req.headers.cookie manually in case cookie-parser hasn't executed
-			if (!requestedScheme && req.headers.cookie) {
-				const cookies = req.headers.cookie.split(';').map(c => c.trim());
-				const capturedCookie = cookies.find(c => c.startsWith('sso_captured_scheme='));
-				if (capturedCookie) {
-					requestedScheme = capturedCookie.split('=')[1];
+				if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) {
+					return url;
 				}
+
+				const parsedUrl = new URL(url);
+				const allowedOrigin = new URL(PUBLIC_URL).origin;
+
+				if (parsedUrl.origin === allowedOrigin) {
+					return url;
+				}
+			} catch (e) {
+				// Fail silently
 			}
 
-			if (requestedScheme && ALLOWED_SCHEMES.includes(requestedScheme)) {
-				return requestedScheme;
-			}
-			
-			// Compatibility: Safely allow known legacy/custom app schemes (like portalpipq, paramarthaapp, finsnapp)
-			// to avoid breaking old apps even if they are not explicitly configured in .env
-			const safeLegacySchemes = ['portalpipq', 'portalpipq-dev', 'paramarthaapp', 'paramarthaapp-dev', 'finsnapp', 'portaldev'];
-			if (requestedScheme && safeLegacySchemes.includes(requestedScheme)) {
-				return requestedScheme;
-			}
-
-			if (requestedScheme) {
-				logger.warn(`⚠️ Warning: App requested scheme '${requestedScheme}', but it is not in .env or safe list. Falling back to '${DEFAULT_SCHEME}'`);
-			}
-			return DEFAULT_SCHEME;
+			logger.warn(`⚠️ Warning: Blocked potentially unsafe redirect URL: "${url}". Defaulting to fallback: "${fallback}"`);
+			return fallback;
 		}
-
-		// Global error/JSON interceptor to capture any 401 INVALID_CREDENTIALS or auth errors
-		// returned by Directus core or external modules, and convert them to friendly HTML for browsers.
-		let interceptorRegistered = false;
-		function registerGlobalErrorInterceptor(app) {
-			if (interceptorRegistered || app.__sso_error_interceptor_registered) return;
-			app.__sso_error_interceptor_registered = true;
-			interceptorRegistered = true;
-
-			logger.info('🛠️ SSO global error interceptor registered on Express app');
-
-			const errorInterceptor = (req, res, next) => {
-				// Capture and store the app scheme if it's passed in the query during login initiation
-				let schemeToCapture = req.query.app_scheme;
-				if (!schemeToCapture) {
-					const redirectUri = req.query.redirect_uri || req.query.redirect;
-					if (redirectUri && typeof redirectUri === 'string') {
-						const match = redirectUri.match(/^([a-zA-Z0-9+-.]+):\/\//);
-						if (match) {
-							schemeToCapture = match[1];
-						}
-					}
-				}
-				if (schemeToCapture && ALLOWED_SCHEMES.includes(schemeToCapture)) {
-					// Store it in a secure cookie for 15 minutes to survive OAuth redirects
-					res.cookie('sso_captured_scheme', schemeToCapture, {
-						httpOnly: true,
-						secure: COOKIE_SECURE,
-						sameSite: COOKIE_SAME_SITE,
-						maxAge: 15 * 60 * 1000, // 15 mins
-						path: '/',
-					});
-				}
-
-				const acceptsHtml = (typeof req.accepts === 'function' && req.accepts('html')) || req.headers.accept?.includes('text/html');
-				const hasBrowserUA = /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
-				const isBrowser = acceptsHtml || hasBrowserUA;
-				if (isBrowser) {
-					// Override res.json to catch JSON error objects before they are sent
-					const originalJson = res.json;
-					res.json = function (body) {
-						if (body && body.errors && Array.isArray(body.errors) && body.errors.length > 0) {
-							const isInvalidCredentials = body.errors.some(e =>
-								e.extensions?.code === 'INVALID_CREDENTIALS' ||
-								e.message?.toLowerCase().includes('credentials')
-							);
-
-							if (isInvalidCredentials) {
-								const scheme = getValidatedScheme(req);
-								const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
-								const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INVALID_CREDENTIALS&message=${encodeURIComponent(body.errors[0]?.message || '')}`;
-
-								res.setHeader('Content-Type', 'text/html');
-
-								// Clear all possible session cookies so the browser doesn't send them on next login attempts
-								const cookieOptionsBase = {
-									httpOnly: true,
-									secure: COOKIE_SECURE,
-									sameSite: COOKIE_SAME_SITE,
-									path: '/',
-								};
-								res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsBase);
-								if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-									res.clearCookie(CORE_COOKIE_NAME, cookieOptionsBase);
-								}
-								res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsBase);
-
-								if (COOKIE_DOMAIN) {
-									const cookieOptionsWithDomain = { ...cookieOptionsBase, domain: COOKIE_DOMAIN };
-									res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsWithDomain);
-									if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-										res.clearCookie(CORE_COOKIE_NAME, cookieOptionsWithDomain);
-									}
-									res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsWithDomain);
-								}
-
-								try {
-									res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
-									res.clearCookie(CORE_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
-									res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
-								} catch (err) { }
-
-								if (typeof res.status === 'function') res.status(401);
-								return res.send(renderFriendlyErrorPage(
-									'Login Session Expired',
-									'Your login credentials are invalid or your session has expired. Please return to the app and try logging in again.',
-									'INVALID_CREDENTIALS',
-									errorRedirectUrl
-								));
-							}
-						}
-						return originalJson.apply(this, arguments);
-					};
-				}
-				next();
-			};
-
-			// Let Express construct and register the Layer properly
-			app.use(errorInterceptor);
-
-			// Move it immediately after expressInit in the Express stack so req/res are fully decorated
-			if (app._router && Array.isArray(app._router.stack)) {
-				const lastLayer = app._router.stack.pop();
-				if (lastLayer) {
-					const initIndex = app._router.stack.findIndex(layer => layer.name === 'expressInit');
-					if (initIndex !== -1) {
-						// Insert immediately after expressInit
-						app._router.stack.splice(initIndex + 1, 0, lastLayer);
-						logger.info(`🛠️ SSO error interceptor moved immediately after expressInit (index ${initIndex + 1})`);
-					} else {
-						// Fallback: insert at index 1 or 2
-						app._router.stack.splice(Math.min(2, app._router.stack.length), 0, lastLayer);
-						logger.info(`🛠️ SSO error interceptor moved to index ${Math.min(2, app._router.stack.length)} (fallback)`);
-					}
-				}
-			}
-		}
-
-		// Register on the first incoming request to the SSO extension
-		router.use((req, res, next) => {
-			if (req.app) {
-				registerGlobalErrorInterceptor(req.app);
-			}
-			next();
-		});
 
 		// ==========================================
 		// 3. ENDPOINTS API
@@ -698,7 +289,6 @@ export default {
 			const scheme = getValidatedScheme(req);
 			const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
 			
-			// Store the app scheme and path in a cookie so we know where to redirect after callback
 			res.cookie('sso_mobile_redirect', JSON.stringify({ scheme, path }), {
 				httpOnly: true,
 				secure: COOKIE_SECURE,
@@ -769,7 +359,6 @@ export default {
 					throw new Error('No access_token returned by Keycloak');
 				}
 
-				// Fetch Keycloak user profile info
 				logger.info(`👤 Fetching Keycloak user profile info...`);
 				const userinfoUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo`;
 				const profileResponse = await fetch(userinfoUrl, {
@@ -790,7 +379,6 @@ export default {
 					throw new Error('Keycloak profile did not contain an email address');
 				}
 
-				// Find or create Directus user
 				const { UsersService } = services;
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
@@ -815,8 +403,7 @@ export default {
 					});
 					user = await usersService.readOne(userId);
 				} else {
-					logger.info(`` + `✅ Found existing Directus user for: ${email}`);
-					// Ensure external ID and provider are set correctly
+					logger.info(`✅ Found existing Directus user for: ${email}`);
 					if (user.provider !== 'keycloak' || user.external_identifier !== sub) {
 						await usersService.updateOne(user.id, {
 							provider: 'keycloak',
@@ -825,12 +412,10 @@ export default {
 					}
 				}
 
-				// Generate Directus session tokens
 				const payload = { id: user.id, role: user.role || DEFAULT_ROLE_ID, app_access: true, admin_access: false };
 				const sessionToken = jwt.sign(payload, env.SECRET, { expiresIn: '7d', issuer: 'directus' });
 				const refreshToken = jwt.sign({ id: user.id, type: 'refresh' }, env.SECRET, { expiresIn: '30d', issuer: 'directus' });
 
-				// Get the stored redirect info from cookie
 				let scheme = DEFAULT_SCHEME;
 				let path = MOBILE_APP_CALLBACK_PATH;
 				
@@ -848,7 +433,6 @@ export default {
 					}
 				}
 
-				// Generate a short-lived keycloak_code for mobile app exchange
 				const keycloakCode = crypto.randomBytes(16).toString('hex');
 				
 				logger.info(`💾 Saving Keycloak tokens to temporary exchange table with code: ${keycloakCode}`);
@@ -859,7 +443,6 @@ export default {
 					id_token: keycloakIdToken || ''
 				});
 
-				// Construct redirect URL back to the mobile app with Directus tokens and the exchange code
 				const redirectUrl = new URL(`${scheme}://${path.replace(/^\/+/, '')}`);
 				redirectUrl.searchParams.set('access_token', sessionToken);
 				redirectUrl.searchParams.set('refresh_token', refreshToken);
@@ -868,7 +451,6 @@ export default {
 				redirectUrl.searchParams.set('email', email);
 				redirectUrl.searchParams.set('keycloak_code', keycloakCode);
 
-				// Clear the redirect cookie
 				res.clearCookie('sso_mobile_redirect', {
 					httpOnly: true,
 					secure: COOKIE_SECURE,
@@ -876,8 +458,6 @@ export default {
 					path: '/',
 				});
 
-				// Since the URL size is now small (no raw Keycloak JWTs in URL),
-				// we can use standard 302 Redirect, which works seamlessly and does not trigger iOS pop-up blocks or Nginx 502 header limits!
 				logger.info(`🚀 Keycloak login successful. Redirecting back to mobile app via 302: ${redirectUrl.toString()}`);
 				return res.redirect(302, redirectUrl.toString());
 			} catch (error) {
@@ -915,12 +495,10 @@ export default {
 					return res.status(404).json({ error: 'Code not found or expired' });
 				}
 
-				// Single-use: delete immediately
 				await database('sso_keycloak_tokens')
 					.where('code', code)
 					.delete();
 
-				// Async cleanup of old tokens (older than 10 minutes)
 				try {
 					const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
 					await database('sso_keycloak_tokens')
@@ -1103,6 +681,7 @@ export default {
 				res.status(500).json({ error: error.message });
 			}
 		});
+
 		// Clear session cookies and redirect
 		router.get('/logout-clear', (req, res) => {
 			const cookieOptionsBase = {
@@ -1112,14 +691,12 @@ export default {
 				path: '/',
 			};
 
-			// 1. Clear without domain (covers host-only cookies like adminfinx.goyong.in)
 			res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsBase);
 			if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
 				res.clearCookie(CORE_COOKIE_NAME, cookieOptionsBase);
 			}
 			res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsBase);
 
-			// 2. Clear with configured COOKIE_DOMAIN (covers domain-level cookies)
 			if (COOKIE_DOMAIN) {
 				const cookieOptionsWithDomain = { ...cookieOptionsBase, domain: COOKIE_DOMAIN };
 				res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsWithDomain);
@@ -1129,7 +706,6 @@ export default {
 				res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsWithDomain);
 			}
 
-			// 3. Clear with explicit parent domain just in case (.goyong.in)
 			try {
 				res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
 				res.clearCookie(CORE_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
@@ -1192,7 +768,6 @@ export default {
 				const token = authHeader?.replace('Bearer ', '');
 				if (!token) return res.status(400).json({ error: 'No token provided' });
 
-				// 1. Verify user token and get their profile
 				let userId = null;
 				let userEmail = null;
 				try {
@@ -1214,9 +789,6 @@ export default {
 
 				logger.info(`[SSO] Deleting account for user: ${userId} (${userEmail})`);
 
-				// 2. Call Directus /auth/logout FIRST — while the session is still active.
-				//    This is important: if we delete from DB first, /auth/logout returns 401
-				//    and can't clean up server-side state cleanly.
 				let directusLogoutOk = false;
 				try {
 					const logoutRes = await fetch(`${PUBLIC_URL}/auth/logout`, {
@@ -1233,12 +805,8 @@ export default {
 					logger.warn('[SSO] /auth/logout network error (non-fatal):', logoutError.message);
 				}
 
-				// 3. Delete ALL remaining sessions for this user from the DB.
-				//    We do this after /auth/logout so that logout can run cleanly,
-				//    but we still purge everything to cover refresh tokens and other sessions.
 				let deletedSessionsCount = 0;
 				try {
-					// 3a. Delete by the exact session token embedded in the JWT
 					const decoded = jwt.decode(token);
 					const sessionToken = decoded?.session;
 					if (sessionToken) {
@@ -1248,7 +816,6 @@ export default {
 						deletedSessionsCount += byToken;
 						logger.info(`[SSO] Deleted ${byToken} session(s) by token for user ${userId}`);
 					}
-					// 3b. Delete any other sessions (refresh tokens, concurrent sessions)
 					const byUser = await database('directus_sessions')
 						.where('user', userId)
 						.delete();
@@ -1260,7 +827,6 @@ export default {
 					logger.error('[SSO] Error deleting sessions:', sessionError);
 				}
 
-				// 4. Suspend + anonymise the user record
 				const { UsersService } = services;
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
@@ -1273,19 +839,12 @@ export default {
 					last_name: 'ACCOUNT',
 					status: 'suspended',
 					email: deletedEmail,
-					// Clear the external_identifier so a new Google/Apple account
-					// with the same email can re-register without conflicts.
 					external_identifier: null,
 					provider: 'default',
 				});
 
 				logger.info(`[SSO] Soft-deleted user ${userId} → ${deletedEmail}, sessions cleared: ${deletedSessionsCount}, directus logout: ${directusLogoutOk}`);
 
-				// 5. Keycloak logout — ONLY if Keycloak is actually configured.
-				//    We check env.KEYCLOAK_URL directly (not the local constant which has a fallback).
-				//    If KEYCLOAK_URL is not in .env, env.KEYCLOAK_URL is undefined → falsy → skipped.
-				//    NOTE: env.KEYCLOAK_ADMIN_USER === 'admin' is NOT a reliable signal —
-				//    'admin' is the standard default Keycloak admin username for real setups.
 				if (isKeycloakAdminConfigured) {
 					try {
 						const adminToken = await getKeycloakAdminToken();
@@ -1301,19 +860,12 @@ export default {
 					}
 				}
 
-				// 6. Return a browser_logout_url that the mobile app MUST open in the browser.
-				//    Rationale: Directus validates JWTs stateless-ly (signature + expiry only).
-				//    Even after session DB deletion, the browser still has the old JWT cookie.
-				//    Directus reads it, finds user=suspended, returns 401 INVALID_CREDENTIALS in ~3ms.
-				//    The ONLY fix is to clear the browser cookie by navigating to logout-clear,
-				//    which sets Set-Cookie: ...; Max-Age=0.
 				const browserLogoutUrl = `${PUBLIC_URL}/sso/logout-clear`;
 
 				return res.json({
 					success: true,
 					message: 'Account deleted successfully, sessions cleared.',
 					sessions_cleared: deletedSessionsCount,
-					// Mobile app must open this URL via WebBrowser to clear browser OAuth cookies
 					browser_logout_url: browserLogoutUrl,
 				});
 			} catch (error) {
@@ -1375,7 +927,6 @@ export default {
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
 
-				// 1. First, try to find user by unique Apple ID (sub)
 				let existingUsers = await usersService.readByQuery({
 					filter: {
 						_and: [
@@ -1387,7 +938,6 @@ export default {
 
 				let user = existingUsers.length > 0 ? existingUsers[0] : null;
 
-				// 2. If not found by Apple ID, try finding by email
 				if (!user) {
 					existingUsers = await usersService.readByQuery({
 						filter: { email: { _eq: email } }
@@ -1395,7 +945,6 @@ export default {
 
 					if (existingUsers.length > 0) {
 						user = existingUsers[0];
-						// Link this existing email account to the Apple ID
 						await usersService.updateOne(user.id, {
 							external_identifier: sub,
 							provider: 'apple'
@@ -1407,7 +956,6 @@ export default {
 				if (user) {
 					userId = user.id;
 				} else {
-					// 3. Create new user if not found by either
 					userId = await usersService.createOne({
 						email,
 						first_name: firstName || 'Apple User',
@@ -1444,7 +992,6 @@ export default {
 				const token = authHeader?.replace('Bearer ', '');
 				if (!token) return res.status(400).json({ error: 'No token provided' });
 
-				// Verify token against /users/me
 				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
 					headers: { 'Authorization': `Bearer ${token}` },
 				});
@@ -1452,7 +999,6 @@ export default {
 				if (!meResponse.ok) return res.status(401).json({ error: 'Invalid token' });
 				const userData = await meResponse.json();
 
-				// Mint a short-lived bridge JWT
 				const payload = {
 					sub: userData.data.id,
 					purpose: 'bridge',
@@ -1471,13 +1017,11 @@ export default {
 			const targetRedirect = getSafeRedirectUrl(redirect_uri || redirect, '/');
 
 			const ENABLE_LEGACY_BRIDGE = env.ENABLE_LEGACY_BRIDGE === 'true';
-			const isBrowser = isBrowserRequest(req);
 			const isBrowserForError = req.accepts('html') || req.headers.accept?.includes('text/html') || /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
 
 			let userId = null;
 			let finalToken = null;
 
-			// Generate deep link redirect URL on error
 			const scheme = getValidatedScheme(req);
 			const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
 			const errorRedirectUrlBase = `${scheme}://${path.replace(/^\/+/, '')}`;
@@ -1494,7 +1038,6 @@ export default {
 					}
 					userId = decoded.sub;
 
-					// Generate a fresh session token for this user
 					const payload = { id: userId, app_access: true, admin_access: false };
 					finalToken = jwt.sign(payload, env.SECRET, { expiresIn: '7d', issuer: 'directus' });
 				} catch (err) {
@@ -1535,7 +1078,6 @@ export default {
 				return res.status(400).json({ error: 'Secure bridge token required' });
 			}
 
-			// Set cookies and redirect
 			res.cookie(SESSION_COOKIE_NAME, finalToken, {
 				httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN,
 				sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/',
