@@ -3,279 +3,590 @@ const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import { getShared } from './shared.js';
 
-export default {
-	id: 'sso',
-	handler: (router, context) => {
-		const { env, logger, services, database, getSchema } = context;
+export default ({ init }, context) => {
+	const { env, logger, services, database, getSchema } = context;
 
-		const {
-			ALLOWED_SCHEMES,
-			DEFAULT_SCHEME,
-			PUBLIC_URL,
-			COOKIE_SECURE,
-			COOKIE_SAME_SITE,
-			SESSION_COOKIE_NAME,
-			REFRESH_TOKEN_COOKIE_NAME,
-			CORE_COOKIE_NAME,
-			COOKIE_DOMAIN,
-			MOBILE_APP_CALLBACK_PATH,
-			getValidatedScheme,
-			escapeHTML,
-			renderFriendlyErrorPage
-		} = getShared(env);
-
-		async function ensureTempTable() {
-			try {
-				const hasTable = await database.schema.hasTable('sso_keycloak_tokens');
-				if (!hasTable) {
-					await database.schema.createTable('sso_keycloak_tokens', (table) => {
-						table.string('code').primary();
-						table.text('access_token');
-						table.text('refresh_token');
+	async function ensureTempTable() {
+		try {
+			const hasTable = await database.schema.hasTable('sso_keycloak_tokens');
+			if (!hasTable) {
+				await database.schema.createTable('sso_keycloak_tokens', (table) => {
+					table.string('code').primary();
+					table.text('access_token');
+					table.text('refresh_token');
+					table.text('id_token');
+					table.timestamp('created_at').defaultTo(database.fn.now());
+				});
+				logger.info('💾 Created temporary table sso_keycloak_tokens');
+			} else {
+				const hasIdToken = await database.schema.hasColumn('sso_keycloak_tokens', 'id_token');
+				if (!hasIdToken) {
+					await database.schema.alterTable('sso_keycloak_tokens', (table) => {
 						table.text('id_token');
-						table.timestamp('created_at').defaultTo(database.fn.now());
 					});
-					logger.info('💾 Created temporary table sso_keycloak_tokens');
-				} else {
-					const hasIdToken = await database.schema.hasColumn('sso_keycloak_tokens', 'id_token');
-					if (!hasIdToken) {
-						await database.schema.alterTable('sso_keycloak_tokens', (table) => {
-							table.text('id_token');
-						});
-						logger.info('💾 Added id_token column to sso_keycloak_tokens');
-					}
+					logger.info('💾 Added id_token column to sso_keycloak_tokens');
 				}
-			} catch (err) {
-				logger.error('⚠️ Failed to ensure sso_keycloak_tokens table:', err);
 			}
+		} catch (err) {
+			logger.error('⚠️ Failed to ensure sso_keycloak_tokens table:', err);
 		}
-		ensureTempTable();
+	}
+	ensureTempTable();
 
-		// ==========================================
-		// 1. KONFIGURASI ENVIRONMENT KEYCLOAK
-		// ==========================================
-		let parsedUrl = env.KEYCLOAK_URL;
-		let parsedRealm = env.KEYCLOAK_REALM;
-		if (env.AUTH_KEYCLOAK_ISSUER_URL) {
-			try {
-				const issuer = new URL(env.AUTH_KEYCLOAK_ISSUER_URL);
-				if (!parsedUrl) parsedUrl = issuer.origin;
-				if (!parsedRealm) {
-					const parts = issuer.pathname.split('/');
-					const realmIndex = parts.indexOf('realms');
-					if (realmIndex !== -1 && parts[realmIndex + 1]) {
-						parsedRealm = parts[realmIndex + 1];
-					}
+	// ==========================================
+	// 1. CONFIGURATION
+	// ==========================================
+	let parsedUrl = env.KEYCLOAK_URL;
+	let parsedRealm = env.KEYCLOAK_REALM;
+	if (env.AUTH_KEYCLOAK_ISSUER_URL) {
+		try {
+			const issuer = new URL(env.AUTH_KEYCLOAK_ISSUER_URL);
+			if (!parsedUrl) parsedUrl = issuer.origin;
+			if (!parsedRealm) {
+				const parts = issuer.pathname.split('/');
+				const realmIndex = parts.indexOf('realms');
+				if (realmIndex !== -1 && parts[realmIndex + 1]) {
+					parsedRealm = parts[realmIndex + 1];
 				}
-			} catch (e) {
-				logger.error('Error parsing AUTH_KEYCLOAK_ISSUER_URL:', e);
+			}
+		} catch (e) {
+			logger.error('Error parsing AUTH_KEYCLOAK_ISSUER_URL:', e);
+		}
+	}
+
+	const KEYCLOAK_URL = parsedUrl || 'http://keycloak:8080';
+	const KEYCLOAK_REALM = parsedRealm || 'testing';
+	const KEYCLOAK_ADMIN_USER = env.KEYCLOAK_ADMIN_USER || 'admin';
+	const KEYCLOAK_ADMIN_PASSWORD = env.KEYCLOAK_ADMIN_PASSWORD || 'admin';
+	const PUBLIC_URL = env.PUBLIC_URL || 'http://localhost:8055';
+
+	const isKeycloakAdminConfigured = !!(
+		(env.KEYCLOAK_URL || env.AUTH_KEYCLOAK_ISSUER_URL) &&
+		env.KEYCLOAK_ADMIN_USER &&
+		env.KEYCLOAK_ADMIN_PASSWORD
+	);
+
+	// Multi-App Scheme
+	const rawSchemes = env.MOBILE_APP_SCHEME || 'finsnapp';
+	const ALLOWED_SCHEMES = Array.isArray(rawSchemes)
+		? rawSchemes.map(s => String(s).trim())
+		: String(rawSchemes).split(',').map(s => s.trim());
+	const DEFAULT_SCHEME = ALLOWED_SCHEMES[0];
+
+	const MOBILE_APP_CALLBACK_PATH = env.MOBILE_APP_CALLBACK_PATH || '/auth/callback';
+	const GOOGLE_CALLBACK_PATH = env.GOOGLE_CALLBACK_PATH || '/auth/callback/google';
+
+	// Apple Configuration
+	const rawAppleClientIds = env.APPLE_CLIENT_ID || 'com.forumbandung.app';
+	const APPLE_CLIENT_IDS = Array.isArray(rawAppleClientIds)
+		? rawAppleClientIds.map(id => String(id).trim().toLowerCase())
+		: String(rawAppleClientIds).split(',').map(id => id.trim().toLowerCase());
+	const KEYCLOAK_CLIENT_ID = env.KEYCLOAK_CLIENT_ID || env.AUTH_KEYCLOAK_CLIENT_ID || 'admin-cli';
+	const COOKIE_DOMAIN = env.COOKIE_DOMAIN || null;
+	const COOKIE_SECURE = env.COOKIE_SECURE !== 'false';
+	const COOKIE_SAME_SITE = env.COOKIE_SAME_SITE || 'lax';
+	const SESSION_COOKIE_NAME = env.SESSION_COOKIE_NAME || 'directus_session_token';
+	const REFRESH_TOKEN_COOKIE_NAME = env.REFRESH_TOKEN_COOKIE_NAME || 'directus_refresh_token';
+	const DEFAULT_ROLE_ID = env.DEFAULT_ROLE_ID || null;
+	const CORE_COOKIE_NAME = 'directus_session_token';
+	const FCM_PROJECT_ID = env.FCM_PROJECT_ID || null;
+
+	// Helpers
+	function escapeHTML(str) {
+		if (typeof str !== 'string') return '';
+		return str.replace(/[&<>"']/g, (m) => {
+			switch (m) {
+				case '&': return '&amp;';
+				case '<': return '&lt;';
+				case '>': return '&gt;';
+				case '"': return '&quot;';
+				case "'": return '&#039;';
+				default: return m;
+			}
+		});
+	}
+
+	function renderFriendlyErrorPage(title, message, errorCode = 'AUTHENTICATION_FAILED', redirectUrl = null) {
+		const escapedTitle = escapeHTML(title);
+		const escapedMessage = escapeHTML(message);
+		const escapedErrorCode = escapeHTML(errorCode);
+		const jsRedirectUrl = JSON.stringify(redirectUrl || '');
+
+		return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${escapedTitle}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            color: #1e293b;
+        }
+        .container {
+            width: 100%;
+            max-width: 440px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.6);
+            border-radius: 24px;
+            padding: 40px 32px;
+            box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.08);
+            text-align: center;
+            animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        .icon-wrapper {
+            width: 72px;
+            height: 72px;
+            background: #fef2f2;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 24px;
+            color: #ef4444;
+            border: 1px solid #fee2e2;
+            animation: scaleIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        @keyframes scaleIn { transform: scale(0); }
+        .icon {
+            width: 32px;
+            height: 32px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 12px;
+            letter-spacing: -0.02em;
+        }
+        p {
+            font-size: 15px;
+            line-height: 1.6;
+            color: #64748b;
+            margin-bottom: 32px;
+        }
+        .instruction-card {
+            background: #f8fafc;
+            border: 1px solid #f1f5f9;
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 28px;
+            text-align: left;
+        }
+        .instruction-card h3 {
+            font-size: 13px;
+            font-weight: 700;
+            color: #475569;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .instruction-list { list-style: none; }
+        .instruction-list li {
+            font-size: 14px;
+            line-height: 1.5;
+            color: #475569;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: flex-start;
+        }
+        .instruction-list li::before {
+            content: "•";
+            color: #ef4444;
+            font-weight: bold;
+            display: inline-block;
+            width: 1em;
+            margin-left: -0.2em;
+            flex-shrink: 0;
+        }
+        .instruction-list li:last-child { margin-bottom: 0; }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            padding: 14px 24px;
+            background: #0f172a;
+            color: #ffffff;
+            border: none;
+            border-radius: 16px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.1);
+            text-decoration: none;
+        }
+        .btn:hover {
+            background: #1e293b;
+            transform: translateY(-1px);
+            box-shadow: 0 10px 15px -3px rgba(15, 23, 42, 0.15);
+        }
+        .btn:active { transform: translateY(0); }
+        .footer-text {
+            font-size: 12px;
+            color: #94a3b8;
+            margin-top: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon-wrapper">
+            <svg class="icon" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+        </div>
+        <h1>${escapedTitle}</h1>
+        <p>${escapedMessage}</p>
+        
+        <div class="instruction-card">
+            <h3>How to resolve this</h3>
+            <ul class="instruction-list">
+                <li>Tap the <strong>✕</strong> close icon at the top left of this screen. Or simply close this page and try again.</li>
+                <li>Click the back button or gesture.</li>
+            </ul>
+        </div>
+
+        <button class="btn" id="returnBtn">Return to App</button>
+        
+        <div class="footer-text">
+            Error Code: ${escapedErrorCode}
+        </div>
+    </div>
+
+    <script>
+        const redirectUrl = ${jsRedirectUrl};
+        const returnBtn = document.getElementById('returnBtn');
+        
+        function handleReturn() {
+            if (redirectUrl) {
+                window.location.href = "/sso/return?redirect_uri=" + encodeURIComponent(redirectUrl);
+                setTimeout(() => {
+                    window.location.href = redirectUrl;
+                    setTimeout(() => {
+                        try { window.close(); } catch(e) {}
+                    }, 1000);
+                }, 2500);
+            } else {
+                try { window.close(); } catch(e) {}
+            }
+        }
+        
+        returnBtn.addEventListener('click', handleReturn);
+        if (redirectUrl) {
+            setTimeout(handleReturn, 2000);
+        }
+    </script>
+</body>
+</html>`;
+	}
+
+	function getValidatedScheme(req) {
+		let requestedScheme = req.query.app_scheme;
+		if (!requestedScheme) {
+			const redirectUri = req.query.redirect_uri || req.query.redirect;
+			if (redirectUri && typeof redirectUri === 'string') {
+				const match = redirectUri.match(/^([a-zA-Z0-9+-.]+):\/\//);
+				if (match) requestedScheme = match[1];
 			}
 		}
-
-		const KEYCLOAK_URL = parsedUrl || 'http://keycloak:8080';
-		const KEYCLOAK_REALM = parsedRealm || 'testing';
-		const KEYCLOAK_ADMIN_USER = env.KEYCLOAK_ADMIN_USER || 'admin';
-		const KEYCLOAK_ADMIN_PASSWORD = env.KEYCLOAK_ADMIN_PASSWORD || 'admin';
-
-		const isKeycloakAdminConfigured = !!(
-			(env.KEYCLOAK_URL || env.AUTH_KEYCLOAK_ISSUER_URL) &&
-			env.KEYCLOAK_ADMIN_USER &&
-			env.KEYCLOAK_ADMIN_PASSWORD
-		);
-
-		const GOOGLE_CALLBACK_PATH = env.GOOGLE_CALLBACK_PATH || '/auth/callback/google';
-
-		// Apple Configuration
-		const rawAppleClientIds = env.APPLE_CLIENT_ID || 'com.forumbandung.app';
-		const APPLE_CLIENT_IDS = Array.isArray(rawAppleClientIds)
-			? rawAppleClientIds.map(id => String(id).trim().toLowerCase())
-			: String(rawAppleClientIds).split(',').map(id => id.trim().toLowerCase());
-		const KEYCLOAK_CLIENT_ID = env.KEYCLOAK_CLIENT_ID || env.AUTH_KEYCLOAK_CLIENT_ID || 'admin-cli';
-		const DEFAULT_ROLE_ID = env.DEFAULT_ROLE_ID || null;
-
-		// Konfigurasi FCM (Firebase Cloud Messaging)
-		const FCM_PROJECT_ID = env.FCM_PROJECT_ID || null;
-
-		logger.info('🚀 Mobile Auth Extension Endpoint loaded');
-		logger.info('📱 Allowed Mobile App Schemes: ' + ALLOWED_SCHEMES.join(', '));
-
-		// ==========================================
-		// 2. HELPER FUNCTIONS SSO
-		// ==========================================
-		async function getKeycloakAdminToken() {
-			try {
-				const response = await fetch(`${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-					body: new URLSearchParams({
-						grant_type: 'password',
-						client_id: 'admin-cli',
-						username: KEYCLOAK_ADMIN_USER,
-						password: KEYCLOAK_ADMIN_PASSWORD,
-					}).toString(),
-				});
-				if (!response.ok) throw new Error('Failed to get admin token');
-				const data = await response.json();
-				return data.access_token;
-			} catch (error) {
-				logger.error('Error getting admin token:', error);
-				return null;
-			}
+		if (!requestedScheme && req.headers.cookie) {
+			const cookies = req.headers.cookie.split(';').map(c => c.trim());
+			const capturedCookie = cookies.find(c => c.startsWith('sso_captured_scheme='));
+			if (capturedCookie) requestedScheme = capturedCookie.split('=')[1];
 		}
-
-		async function getKeycloakUserId(adminToken, email) {
-			try {
-				const response = await fetch(
-					`${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?email=${encodeURIComponent(email)}`,
-					{ headers: { 'Authorization': `Bearer ${adminToken}` } }
-				);
-				if (!response.ok) throw new Error('Failed to get user');
-				const users = await response.json();
-				return users.length > 0 ? users[0].id : null;
-			} catch (error) {
-				logger.error('Error getting user ID:', error);
-				return null;
-			}
+		if (requestedScheme && ALLOWED_SCHEMES.includes(requestedScheme)) {
+			return requestedScheme;
 		}
-
-		async function logoutKeycloakUser(adminToken, userId) {
-			try {
-				const response = await fetch(
-					`${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/logout`,
-					{ method: 'POST', headers: { 'Authorization': `Bearer ${adminToken}` } }
-				);
-				return response.ok || response.status === 204;
-			} catch (error) {
-				logger.error('Error logging out user from Keycloak:', error);
-				return false;
-			}
+		const safeLegacySchemes = ['portalpipq', 'portalpipq-dev', 'paramarthaapp', 'paramarthaapp-dev', 'finsnapp', 'portaldev'];
+		if (requestedScheme && safeLegacySchemes.includes(requestedScheme)) {
+			return requestedScheme;
 		}
+		return DEFAULT_SCHEME;
+	}
 
-		function isBrowserRequest(req) {
-			if (req.query.type === 'browser') return true;
-			if (req.query.type === 'mobile') return false;
-			if (req.query.app_scheme || req.query.app_path) return false;
-			const userAgent = req.headers['user-agent'] || '';
-			return /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(userAgent) &&
-				!/Mobile.*App|ReactNative|Expo/i.test(userAgent);
-		}
-
-		async function tryAllCookies(req, cookieName) {
-			const rawCookie = req.headers.cookie;
-			if (!rawCookie) return null;
-			const cookieValues = rawCookie.split(';')
-				.map(c => c.trim())
-				.filter(c => c.startsWith(`${cookieName}=`))
-				.map(c => c.substring(cookieName.length + 1));
-			if (cookieValues.length === 0) return null;
-
-			for (let i = 0; i < cookieValues.length; i++) {
-				const token = cookieValues[i];
-				try {
-					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-						headers: { 'Cookie': `${cookieName}=${token}` },
-					});
-					if (meResponse.ok) {
-						const userData = await meResponse.json();
-						return { token, userData: userData.data };
-					}
-				} catch (err) { }
-			}
+	async function getKeycloakAdminToken() {
+		try {
+			const response = await fetch(`${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({
+					grant_type: 'password',
+					client_id: 'admin-cli',
+					username: KEYCLOAK_ADMIN_USER,
+					password: KEYCLOAK_ADMIN_PASSWORD,
+				}).toString(),
+			});
+			if (!response.ok) throw new Error('Failed to get admin token');
+			const data = await response.json();
+			return data.access_token;
+		} catch (error) {
+			logger.error('Error getting admin token:', error);
 			return null;
 		}
+	}
 
-		async function tryEveryPossibleJwt(req) {
-			const rawCookie = req.headers.cookie;
-			if (!rawCookie) return null;
-			const candidates = rawCookie.split(';')
-				.map(c => c.trim())
-				.map(c => {
-					const parts = c.split('=');
-					return parts.length > 1 ? parts[1] : null;
-				})
-				.filter(v => v && v.startsWith('eyJ') && v.length > 50);
-			if (candidates.length === 0) return null;
-
-			for (let i = 0; i < candidates.length; i++) {
-				const token = candidates[i];
-				try {
-					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-						headers: { 'Authorization': `Bearer ${token}` }
-					});
-					if (meResponse.ok) {
-						const userData = await meResponse.json();
-						return { token, userData: userData.data };
-					}
-				} catch (err) { }
-			}
+	async function getKeycloakUserId(adminToken, email) {
+		try {
+			const response = await fetch(
+				`${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?email=${encodeURIComponent(email)}`,
+				{ headers: { 'Authorization': `Bearer ${adminToken}` } }
+			);
+			if (!response.ok) throw new Error('Failed to get user');
+			const users = await response.json();
+			return users.length > 0 ? users[0].id : null;
+		} catch (error) {
+			logger.error('Error getting user ID:', error);
 			return null;
 		}
+	}
 
-		async function tryRefreshToken(req) {
-			const refreshToken = req.cookies[REFRESH_TOKEN_COOKIE_NAME];
-			if (!refreshToken) return null;
+	async function logoutKeycloakUser(adminToken, userId) {
+		try {
+			const response = await fetch(
+				`${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/logout`,
+				{ method: 'POST', headers: { 'Authorization': `Bearer ${adminToken}` } }
+			);
+			return response.ok || response.status === 204;
+		} catch (error) {
+			logger.error('Error logging out user from Keycloak:', error);
+			return false;
+		}
+	}
+
+	function isBrowserRequest(req) {
+		if (req.query.type === 'browser') return true;
+		if (req.query.type === 'mobile') return false;
+		if (req.query.app_scheme || req.query.app_path) return false;
+		const userAgent = req.headers['user-agent'] || '';
+		return /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(userAgent) &&
+			!/Mobile.*App|ReactNative|Expo/i.test(userAgent);
+	}
+
+	async function tryAllCookies(req, cookieName) {
+		const rawCookie = req.headers.cookie;
+		if (!rawCookie) return null;
+		const cookieValues = rawCookie.split(';')
+			.map(c => c.trim())
+			.filter(c => c.startsWith(`${cookieName}=`))
+			.map(c => c.substring(cookieName.length + 1));
+		if (cookieValues.length === 0) return null;
+
+		for (let i = 0; i < cookieValues.length; i++) {
+			const token = cookieValues[i];
 			try {
-				const refreshResponse = await fetch(`${PUBLIC_URL}/auth/refresh`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ refresh_token: refreshToken })
+				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+					headers: { 'Cookie': `${cookieName}=${token}` },
 				});
-				if (refreshResponse.ok) {
-					const data = await refreshResponse.json();
-					const newToken = data.data.access_token;
-					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-						headers: { 'Authorization': `Bearer ${newToken}` }
-					});
-					if (meResponse.ok) {
-						const userData = await meResponse.json();
-						return { token: newToken, userData: userData.data };
-					}
+				if (meResponse.ok) {
+					const userData = await meResponse.json();
+					return { token, userData: userData.data };
 				}
 			} catch (err) { }
-			return null;
 		}
+		return null;
+	}
 
-		// Helper function to validate redirect URL to prevent open redirect
-		function getSafeRedirectUrl(url, fallback = '/') {
-			if (!url || typeof url !== 'string') return fallback;
+	async function tryEveryPossibleJwt(req) {
+		const rawCookie = req.headers.cookie;
+		if (!rawCookie) return null;
+		const candidates = rawCookie.split(';')
+			.map(c => c.trim())
+			.map(c => {
+				const parts = c.split('=');
+				return parts.length > 1 ? parts[1] : null;
+			})
+			.filter(v => v && v.startsWith('eyJ') && v.length > 50);
+		if (candidates.length === 0) return null;
 
+		for (let i = 0; i < candidates.length; i++) {
+			const token = candidates[i];
 			try {
-				const hasAppScheme = ALLOWED_SCHEMES.some(scheme => url.startsWith(`${scheme}://`));
-				if (hasAppScheme) {
-					return url;
+				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+					headers: { 'Authorization': `Bearer ${token}` }
+				});
+				if (meResponse.ok) {
+					const userData = await meResponse.json();
+					return { token, userData: userData.data };
 				}
+			} catch (err) { }
+		}
+		return null;
+	}
 
-				if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) {
-					return url;
+	async function tryRefreshToken(req) {
+		if (!req.cookies) return null;
+		const refreshToken = req.cookies[REFRESH_TOKEN_COOKIE_NAME];
+		if (!refreshToken) return null;
+		try {
+			const refreshResponse = await fetch(`${PUBLIC_URL}/auth/refresh`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ refresh_token: refreshToken })
+			});
+			if (refreshResponse.ok) {
+				const data = await refreshResponse.json();
+				const newToken = data.data.access_token;
+				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+					headers: { 'Authorization': `Bearer ${newToken}` }
+				});
+				if (meResponse.ok) {
+					const userData = await meResponse.json();
+					return { token: newToken, userData: userData.data };
 				}
+			}
+		} catch (err) { }
+		return null;
+	}
 
-				const parsedUrl = new URL(url);
-				const allowedOrigin = new URL(PUBLIC_URL).origin;
+	function getSafeRedirectUrl(url, fallback = '/') {
+		if (!url || typeof url !== 'string') return fallback;
+		try {
+			const hasAppScheme = ALLOWED_SCHEMES.some(scheme => url.startsWith(`${scheme}://`));
+			if (hasAppScheme) return url;
+			if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) return url;
+			const parsedUrl = new URL(url);
+			const allowedOrigin = new URL(PUBLIC_URL).origin;
+			if (parsedUrl.origin === allowedOrigin) return url;
+		} catch (e) { }
+		logger.warn(`⚠️ Warning: Blocked potentially unsafe redirect URL: "${url}". Defaulting to fallback: "${fallback}"`);
+		return fallback;
+	}
 
-				if (parsedUrl.origin === allowedOrigin) {
-					return url;
+	// ==========================================
+	// 2. MIDDLEWARE & ROUTES REGISTRATION
+	// ==========================================
+	init('middlewares.before', ({ app }) => {
+		logger.info('🛠️ Registering global SSO hook middlewares and routes...');
+
+		// A. Register Global Interceptors (Legacy login intercept & JSON error page override)
+		app.use((req, res, next) => {
+			// 1. Intercept legacy mobile requests targeting Directus's native `/auth/login/keycloak`
+			if (req.method === 'GET' && req.path === '/auth/login/keycloak') {
+				const redirectParam = req.query.redirect_uri || req.query.redirect;
+				if (redirectParam && typeof redirectParam === 'string' && redirectParam.includes('sso/mobile-callback')) {
+					logger.info(`📱 Intercepted legacy /auth/login/keycloak request. Redirecting to OIDC proxy flow...`);
+					const targetUrl = new URL(`${PUBLIC_URL}/sso/login/keycloak`);
+					targetUrl.searchParams.set('app_scheme', DEFAULT_SCHEME);
+					targetUrl.searchParams.set('app_path', '/auth/callback');
+					return res.redirect(targetUrl.toString());
 				}
-			} catch (e) {
-				// Fail silently
 			}
 
-			logger.warn(`⚠️ Warning: Blocked potentially unsafe redirect URL: "${url}". Defaulting to fallback: "${fallback}"`);
-			return fallback;
-		}
+			// 2. Capture and store the app scheme if it's passed in the query during login initiation
+			let schemeToCapture = req.query.app_scheme;
+			if (!schemeToCapture) {
+				const redirectUri = req.query.redirect_uri || req.query.redirect;
+				if (redirectUri && typeof redirectUri === 'string') {
+					const match = redirectUri.match(/^([a-zA-Z0-9+-.]+):\/\//);
+					if (match) schemeToCapture = match[1];
+				}
+			}
+			if (schemeToCapture && ALLOWED_SCHEMES.includes(schemeToCapture)) {
+				res.cookie('sso_captured_scheme', schemeToCapture, {
+					httpOnly: true, secure: COOKIE_SECURE, sameSite: COOKIE_SAME_SITE, maxAge: 15 * 60 * 1000, path: '/'
+				});
+			}
 
-		// ==========================================
-		// 3. ENDPOINTS API
-		// ==========================================
+			// 3. Global error/JSON interceptor to capture any 401 INVALID_CREDENTIALS or auth errors
+			const acceptsHtml = (typeof req.accepts === 'function' && req.accepts('html')) || req.headers.accept?.includes('text/html');
+			const hasBrowserUA = /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
+			const isBrowser = acceptsHtml || hasBrowserUA;
+			if (isBrowser) {
+				const originalJson = res.json;
+				res.json = function (body) {
+					if (body && body.errors && Array.isArray(body.errors) && body.errors.length > 0) {
+						const isInvalidCredentials = body.errors.some(e =>
+							e.extensions?.code === 'INVALID_CREDENTIALS' || e.message?.toLowerCase().includes('credentials')
+						);
 
-		// Health check
-		router.get('/health', (req, res) => {
+						if (isInvalidCredentials) {
+							const scheme = getValidatedScheme(req);
+							const path = req.query.app_path || '/auth/callback';
+							const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INVALID_CREDENTIALS&message=${encodeURIComponent(body.errors[0]?.message || '')}`;
+
+							res.setHeader('Content-Type', 'text/html');
+
+							const cookieOptionsBase = { httpOnly: true, secure: COOKIE_SECURE, sameSite: COOKIE_SAME_SITE, path: '/' };
+							res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsBase);
+							if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+								res.clearCookie(CORE_COOKIE_NAME, cookieOptionsBase);
+							}
+							res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsBase);
+
+							if (COOKIE_DOMAIN) {
+								const cookieOptionsWithDomain = { ...cookieOptionsBase, domain: COOKIE_DOMAIN };
+								res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsWithDomain);
+								if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+									res.clearCookie(CORE_COOKIE_NAME, cookieOptionsWithDomain);
+								}
+								res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, cookieOptionsWithDomain);
+							}
+
+							try {
+								res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+								res.clearCookie(CORE_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+								res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, { ...cookieOptionsBase, domain: '.goyong.in' });
+							} catch (err) { }
+
+							if (typeof res.status === 'function') res.status(401);
+							return res.send(renderFriendlyErrorPage(
+								'Login Session Expired',
+								'Your login credentials are invalid or your session has expired. Please return to the app and try logging in again.',
+								'INVALID_CREDENTIALS',
+								errorRedirectUrl
+							));
+						}
+					}
+					return originalJson.apply(this, arguments);
+				};
+			}
+			next();
+		});
+
+		// B. Mount SSO Custom Routes directly on the Express app
+		// 1. Health check
+		app.get('/sso/health', (req, res) => {
 			res.json({ status: 'ok', service: 'directus-extension-sso', version, allowed_schemes: ALLOWED_SCHEMES, fcm_enabled: !!FCM_PROJECT_ID });
 		});
 
-		// Server-side redirect helper to reliably return to custom mobile app deep links
-		router.get('/return', (req, res) => {
+		// 2. Return URL helper
+		app.get('/sso/return', (req, res) => {
 			const redirectUri = req.query.redirect_uri || req.query.redirect;
 			if (redirectUri) {
 				logger.info(`🔄 Server-side redirecting back to app via 302: ${redirectUri}`);
@@ -284,17 +595,13 @@ export default {
 			return res.status(400).send('Missing redirect_uri');
 		});
 
-		// Initiate Keycloak OIDC login flow directly through the extension
-		router.get('/login/keycloak', (req, res) => {
+		// 3. Initiate Keycloak Login
+		app.get('/sso/login/keycloak', (req, res) => {
 			const scheme = getValidatedScheme(req);
 			const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
 			
 			res.cookie('sso_mobile_redirect', JSON.stringify({ scheme, path }), {
-				httpOnly: true,
-				secure: COOKIE_SECURE,
-				sameSite: COOKIE_SAME_SITE,
-				maxAge: 15 * 60 * 1000, // 15 mins
-				path: '/',
+				httpOnly: true, secure: COOKIE_SECURE, sameSite: COOKIE_SAME_SITE, maxAge: 15 * 60 * 1000, path: '/'
 			});
 
 			const redirectUri = `${PUBLIC_URL}/sso/keycloak-callback`;
@@ -311,8 +618,8 @@ export default {
 			res.redirect(keycloakAuthUrl);
 		});
 
-		// Keycloak OIDC callback endpoint
-		router.get('/keycloak-callback', async (req, res) => {
+		// 4. Keycloak OAuth Callback
+		app.get('/sso/keycloak-callback', async (req, res) => {
 			const { code } = req.query;
 			if (!code) {
 				logger.error('❌ Keycloak Callback: Missing code in query parameters');
@@ -322,7 +629,6 @@ export default {
 			try {
 				const redirectUri = `${PUBLIC_URL}/sso/keycloak-callback`;
 				const tokenUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token`;
-				
 				const clientSecret = env.KEYCLOAK_CLIENT_SECRET || env.AUTH_KEYCLOAK_CLIENT_SECRET || '';
 
 				logger.info(`🔄 Exchanging authorization code at Keycloak token endpoint...`);
@@ -333,7 +639,6 @@ export default {
 					code,
 					redirect_uri: redirectUri,
 				};
-
 				if (clientSecret) {
 					tokenParams.client_secret = clientSecret;
 				}
@@ -355,9 +660,7 @@ export default {
 				const keycloakRefreshToken = tokens.refresh_token;
 				const keycloakIdToken = tokens.id_token || '';
 
-				if (!keycloakAccessToken) {
-					throw new Error('No access_token returned by Keycloak');
-				}
+				if (!keycloakAccessToken) throw new Error('No access_token returned by Keycloak');
 
 				logger.info(`👤 Fetching Keycloak user profile info...`);
 				const userinfoUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo`;
@@ -375,19 +678,14 @@ export default {
 				const email = profile.email;
 				const sub = profile.sub;
 
-				if (!email) {
-					throw new Error('Keycloak profile did not contain an email address');
-				}
+				if (!email) throw new Error('Keycloak profile did not contain an email address');
 
 				const { UsersService } = services;
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
 
 				logger.info(`🔍 Finding or creating Directus user for email: ${email}`);
-				let existingUsers = await usersService.readByQuery({
-					filter: { email: { _eq: email } }
-				});
-
+				let existingUsers = await usersService.readByQuery({ filter: { email: { _eq: email } } });
 				let user = existingUsers.length > 0 ? existingUsers[0] : null;
 
 				if (!user) {
@@ -405,10 +703,7 @@ export default {
 				} else {
 					logger.info(`✅ Found existing Directus user for: ${email}`);
 					if (user.provider !== 'keycloak' || user.external_identifier !== sub) {
-						await usersService.updateOne(user.id, {
-							provider: 'keycloak',
-							external_identifier: sub
-						});
+						await usersService.updateOne(user.id, { provider: 'keycloak', external_identifier: sub });
 					}
 				}
 
@@ -419,9 +714,7 @@ export default {
 				let scheme = DEFAULT_SCHEME;
 				let path = MOBILE_APP_CALLBACK_PATH;
 				
-				const rawCookie = req.cookies?.sso_mobile_redirect || 
-					(req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('sso_mobile_redirect='))?.split('=')[1]);
-					
+				const rawCookie = req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('sso_mobile_redirect='))?.split('=')[1];
 				if (rawCookie) {
 					try {
 						const val = decodeURIComponent(rawCookie);
@@ -451,12 +744,7 @@ export default {
 				redirectUrl.searchParams.set('email', email);
 				redirectUrl.searchParams.set('keycloak_code', keycloakCode);
 
-				res.clearCookie('sso_mobile_redirect', {
-					httpOnly: true,
-					secure: COOKIE_SECURE,
-					sameSite: COOKIE_SAME_SITE,
-					path: '/',
-				});
+				res.clearCookie('sso_mobile_redirect', { httpOnly: true, secure: COOKIE_SECURE, sameSite: COOKIE_SAME_SITE, path: '/' });
 
 				logger.info(`🚀 Keycloak login successful. Redirecting back to mobile app via 302: ${redirectUrl.toString()}`);
 				return res.redirect(302, redirectUrl.toString());
@@ -477,33 +765,20 @@ export default {
 			}
 		});
 
-		// Exchange short-lived code for Keycloak tokens
-		router.get('/keycloak-token', async (req, res) => {
+		// 5. Exchange keycloak code
+		app.get('/sso/keycloak-token', async (req, res) => {
 			const { code } = req.query;
-			if (!code) {
-				logger.error('❌ Keycloak Token exchange: Missing code parameter');
-				return res.status(400).json({ error: 'Missing code' });
-			}
+			if (!code) return res.status(400).json({ error: 'Missing code' });
 
 			try {
-				const row = await database('sso_keycloak_tokens')
-					.where('code', code)
-					.first();
+				const row = await database('sso_keycloak_tokens').where('code', code).first();
+				if (!row) return res.status(404).json({ error: 'Code not found or expired' });
 
-				if (!row) {
-					logger.error(`❌ Keycloak Token exchange: Code ${code} not found or expired`);
-					return res.status(404).json({ error: 'Code not found or expired' });
-				}
-
-				await database('sso_keycloak_tokens')
-					.where('code', code)
-					.delete();
+				await database('sso_keycloak_tokens').where('code', code).delete();
 
 				try {
 					const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-					await database('sso_keycloak_tokens')
-						.where('created_at', '<', tenMinutesAgo)
-						.delete();
+					await database('sso_keycloak_tokens').where('created_at', '<', tenMinutesAgo).delete();
 				} catch (cleanupErr) {}
 
 				logger.info(`✅ Keycloak tokens retrieved successfully for code: ${code}`);
@@ -519,8 +794,8 @@ export default {
 			}
 		});
 
-		// Mobile callback endpoint
-		router.get('/mobile-callback', async (req, res) => {
+		// 6. Mobile callback (Cookie verification/exchange)
+		app.get('/sso/mobile-callback', async (req, res) => {
 			const isBrowser = isBrowserRequest(req);
 			const isBrowserForError = req.accepts('html') || req.headers.accept?.includes('text/html') || /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
 			try {
@@ -590,19 +865,16 @@ export default {
 			}
 		});
 
-		// Google callback endpoint
-		router.get('/google-callback', async (req, res) => {
+		// 7. Google callback helper
+		app.get('/sso/google-callback', async (req, res) => {
 			const isBrowser = isBrowserRequest(req);
 			const isBrowserForError = req.accepts('html') || req.headers.accept?.includes('text/html') || /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(req.headers['user-agent'] || '');
 			try {
 				let authResult = null;
-
 				if (req.query.access_token) {
 					authResult = { token: req.query.access_token, refresh_token: req.query.refresh_token || null, expires: req.query.expires || null };
 					try {
-						const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-							headers: { 'Authorization': `Bearer ${authResult.token}` },
-						});
+						const meResponse = await fetch(`${PUBLIC_URL}/users/me`, { headers: { 'Authorization': `Bearer ${authResult.token}` } });
 						if (meResponse.ok) {
 							const meData = await meResponse.json();
 							authResult.userData = meData.data;
@@ -682,15 +954,9 @@ export default {
 			}
 		});
 
-		// Clear session cookies and redirect
-		router.get('/logout-clear', (req, res) => {
-			const cookieOptionsBase = {
-				httpOnly: true,
-				secure: COOKIE_SECURE,
-				sameSite: COOKIE_SAME_SITE,
-				path: '/',
-			};
-
+		// 8. Logout and clear cookies
+		app.get('/sso/logout-clear', (req, res) => {
+			const cookieOptionsBase = { httpOnly: true, secure: COOKIE_SECURE, sameSite: COOKIE_SAME_SITE, path: '/' };
 			res.clearCookie(SESSION_COOKIE_NAME, cookieOptionsBase);
 			if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
 				res.clearCookie(CORE_COOKIE_NAME, cookieOptionsBase);
@@ -722,8 +988,8 @@ export default {
 			return res.json({ success: true, message: 'Cookies cleared successfully' });
 		});
 
-		// Mobile logout endpoint 
-		router.post('/mobile-logout', async (req, res) => {
+		// 9. Mobile Logout
+		app.post('/sso/mobile-logout', async (req, res) => {
 			try {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.replace('Bearer ', '');
@@ -761,8 +1027,8 @@ export default {
 			}
 		});
 
-		// Delete user account and clear all active sessions
-		router.post('/delete-account', async (req, res) => {
+		// 10. Delete Account
+		app.post('/sso/delete-account', async (req, res) => {
 			try {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.replace('Bearer ', '');
@@ -771,9 +1037,7 @@ export default {
 				let userId = null;
 				let userEmail = null;
 				try {
-					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-						headers: { 'Authorization': `Bearer ${token}` }
-					});
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, { headers: { 'Authorization': `Bearer ${token}` } });
 					if (meResponse.ok) {
 						const userData = await meResponse.json();
 						userId = userData.data.id;
@@ -783,9 +1047,7 @@ export default {
 					logger.error('[SSO] Error verifying token during account deletion:', error);
 				}
 
-				if (!userId || !userEmail) {
-					return res.status(401).json({ error: 'Invalid or expired token' });
-				}
+				if (!userId || !userEmail) return res.status(401).json({ error: 'Invalid or expired token' });
 
 				logger.info(`[SSO] Deleting account for user: ${userId} (${userEmail})`);
 
@@ -793,10 +1055,7 @@ export default {
 				try {
 					const logoutRes = await fetch(`${PUBLIC_URL}/auth/logout`, {
 						method: 'POST',
-						headers: {
-							'Authorization': `Bearer ${token}`,
-							'Content-Type': 'application/json',
-						},
+						headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
 						body: JSON.stringify({}),
 					});
 					directusLogoutOk = logoutRes.ok || logoutRes.status === 204;
@@ -810,15 +1069,11 @@ export default {
 					const decoded = jwt.decode(token);
 					const sessionToken = decoded?.session;
 					if (sessionToken) {
-						const byToken = await database('directus_sessions')
-							.where('token', sessionToken)
-							.delete();
+						const byToken = await database('directus_sessions').where('token', sessionToken).delete();
 						deletedSessionsCount += byToken;
 						logger.info(`[SSO] Deleted ${byToken} session(s) by token for user ${userId}`);
 					}
-					const byUser = await database('directus_sessions')
-						.where('user', userId)
-						.delete();
+					const byUser = await database('directus_sessions').where('user', userId).delete();
 					deletedSessionsCount += byUser;
 					if (byUser > 0) {
 						logger.info(`[SSO] Deleted ${byUser} additional session(s) by user ID for ${userId}`);
@@ -835,12 +1090,7 @@ export default {
 				const deletedEmail = `DELETED_${timestamp}_${userEmail}`;
 
 				await usersService.updateOne(userId, {
-					first_name: 'DELETED',
-					last_name: 'ACCOUNT',
-					status: 'suspended',
-					email: deletedEmail,
-					external_identifier: null,
-					provider: 'default',
+					first_name: 'DELETED', last_name: 'ACCOUNT', status: 'suspended', email: deletedEmail, external_identifier: null, provider: 'default'
 				});
 
 				logger.info(`[SSO] Soft-deleted user ${userId} → ${deletedEmail}, sessions cleared: ${deletedSessionsCount}, directus logout: ${directusLogoutOk}`);
@@ -861,12 +1111,8 @@ export default {
 				}
 
 				const browserLogoutUrl = `${PUBLIC_URL}/sso/logout-clear`;
-
 				return res.json({
-					success: true,
-					message: 'Account deleted successfully, sessions cleared.',
-					sessions_cleared: deletedSessionsCount,
-					browser_logout_url: browserLogoutUrl,
+					success: true, message: 'Account deleted successfully, sessions cleared.', sessions_cleared: deletedSessionsCount, browser_logout_url: browserLogoutUrl
 				});
 			} catch (error) {
 				logger.error('[SSO] Account deletion failed:', error);
@@ -874,17 +1120,12 @@ export default {
 			}
 		});
 
-		// Apple login endpoint
-		router.post('/apple-token', async (req, res) => {
+		// 11. Apple login token verify
+		app.post('/sso/apple-token', async (req, res) => {
 			const { identityToken, firstName, lastName } = req.body;
 			logger.info('🍎 Apple token exchange request received');
 
-			if (!identityToken) {
-				return res.status(400).json({
-					error: 'identityToken is required',
-					message: 'Apple identityToken must be provided in the request body'
-				});
-			}
+			if (!identityToken) return res.status(400).json({ error: 'identityToken is required', message: 'Apple identityToken must be provided in the request body' });
 
 			try {
 				const verifyAppleToken = async (idToken) => {
@@ -896,10 +1137,7 @@ export default {
 
 					const allowedAudiences = [...APPLE_CLIENT_IDS, 'host.exp.exponent'];
 					const actualAud = payload.aud.toLowerCase();
-
-					if (!allowedAudiences.includes(actualAud)) {
-						throw new Error(`Invalid audience: ${actualAud}. Allowed: ${allowedAudiences.join(', ')}`);
-					}
+					if (!allowedAudiences.includes(actualAud)) throw new Error(`Invalid audience: ${actualAud}. Allowed: ${allowedAudiences.join(', ')}`);
 
 					if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('Token expired');
 
@@ -920,7 +1158,6 @@ export default {
 
 				const decodedToken = await verifyAppleToken(identityToken);
 				const { email, sub } = decodedToken;
-
 				if (!email) throw new Error('Apple token did not contain an email');
 
 				const { UsersService } = services;
@@ -928,27 +1165,15 @@ export default {
 				const usersService = new UsersService({ schema, knex: database });
 
 				let existingUsers = await usersService.readByQuery({
-					filter: {
-						_and: [
-							{ external_identifier: { _eq: sub } },
-							{ provider: { _eq: 'apple' } }
-						]
-					}
+					filter: { _and: [ { external_identifier: { _eq: sub } }, { provider: { _eq: 'apple' } } ] }
 				});
-
 				let user = existingUsers.length > 0 ? existingUsers[0] : null;
 
 				if (!user) {
-					existingUsers = await usersService.readByQuery({
-						filter: { email: { _eq: email } }
-					});
-
+					existingUsers = await usersService.readByQuery({ filter: { email: { _eq: email } } });
 					if (existingUsers.length > 0) {
 						user = existingUsers[0];
-						await usersService.updateOne(user.id, {
-							external_identifier: sub,
-							provider: 'apple'
-						});
+						await usersService.updateOne(user.id, { external_identifier: sub, provider: 'apple' });
 					}
 				}
 
@@ -957,13 +1182,7 @@ export default {
 					userId = user.id;
 				} else {
 					userId = await usersService.createOne({
-						email,
-						first_name: firstName || 'Apple User',
-						last_name: lastName || '',
-						role: DEFAULT_ROLE_ID,
-						status: 'active',
-						provider: 'apple',
-						external_identifier: sub
+						email, first_name: firstName || 'Apple User', last_name: lastName || '', role: DEFAULT_ROLE_ID, status: 'active', provider: 'apple', external_identifier: sub
 					});
 					user = await usersService.readOne(userId);
 				}
@@ -985,34 +1204,27 @@ export default {
 			}
 		});
 
-		// Generate short-lived signed bridge token
-		router.post('/bridge-token', async (req, res) => {
+		// 12. Bridge Token
+		app.post('/sso/bridge-token', async (req, res) => {
 			try {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.replace('Bearer ', '');
 				if (!token) return res.status(400).json({ error: 'No token provided' });
 
-				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-					headers: { 'Authorization': `Bearer ${token}` },
-				});
-
+				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, { headers: { 'Authorization': `Bearer ${token}` } });
 				if (!meResponse.ok) return res.status(401).json({ error: 'Invalid token' });
 				const userData = await meResponse.json();
 
-				const payload = {
-					sub: userData.data.id,
-					purpose: 'bridge',
-				};
+				const payload = { sub: userData.data.id, purpose: 'bridge' };
 				const bridgeToken = jwt.sign(payload, env.SECRET, { expiresIn: '60s', issuer: 'directus-sso' });
-
 				res.json({ success: true, bridge_token: bridgeToken });
 			} catch (error) {
 				res.status(500).json({ error: error.message });
 			}
 		});
 
-		// WebView SSO Bridge 
-		router.get('/bridge', async (req, res) => {
+		// 13. Bridge GET Endpoint
+		app.get('/sso/bridge', async (req, res) => {
 			const { token, bridge_token, redirect_uri, redirect } = req.query;
 			const targetRedirect = getSafeRedirectUrl(redirect_uri || redirect, '/');
 
@@ -1037,7 +1249,6 @@ export default {
 						return res.status(400).json({ error: 'Invalid token purpose' });
 					}
 					userId = decoded.sub;
-
 					const payload = { id: userId, app_access: true, admin_access: false };
 					finalToken = jwt.sign(payload, env.SECRET, { expiresIn: '7d', issuer: 'directus' });
 				} catch (err) {
@@ -1050,9 +1261,7 @@ export default {
 			} else if (token && ENABLE_LEGACY_BRIDGE) {
 				logger.warn('⚠️ Warning: Legacy bridge token used. This flow is vulnerable to session fixation.');
 				try {
-					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-						headers: { 'Authorization': `Bearer ${token}` },
-					});
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, { headers: { 'Authorization': `Bearer ${token}` } });
 					if (!meResponse.ok) {
 						if (isBrowserForError) {
 							res.setHeader('Content-Type', 'text/html');
@@ -1079,19 +1288,15 @@ export default {
 			}
 
 			res.cookie(SESSION_COOKIE_NAME, finalToken, {
-				httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN,
-				sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/',
+				httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN, sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/'
 			});
 
 			if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
 				res.cookie(CORE_COOKIE_NAME, finalToken, {
-					httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN,
-					sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/',
+					httpOnly: true, secure: COOKIE_SECURE, domain: COOKIE_DOMAIN, sameSite: COOKIE_SAME_SITE, maxAge: 7 * 24 * 60 * 60 * 1000, path: '/'
 				});
 			}
-
 			return res.redirect(targetRedirect);
 		});
-
-	}
+	});
 };
