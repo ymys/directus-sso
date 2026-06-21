@@ -633,6 +633,200 @@ export default {
 			return res.status(400).send('Missing redirect_uri');
 		});
 
+		// Initiate Keycloak OIDC login flow directly through the extension
+		router.get('/login/keycloak', (req, res) => {
+			const scheme = getValidatedScheme(req);
+			const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+			
+			// Store the app scheme and path in a cookie so we know where to redirect after callback
+			res.cookie('sso_mobile_redirect', JSON.stringify({ scheme, path }), {
+				httpOnly: true,
+				secure: COOKIE_SECURE,
+				sameSite: COOKIE_SAME_SITE,
+				maxAge: 15 * 60 * 1000, // 15 mins
+				path: '/',
+			});
+
+			const redirectUri = `${PUBLIC_URL}/sso/keycloak-callback`;
+			const keycloakAuthUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth?` +
+				new URLSearchParams({
+					client_id: KEYCLOAK_CLIENT_ID,
+					redirect_uri: redirectUri,
+					response_type: 'code',
+					scope: 'openid email profile',
+					state: crypto.randomBytes(16).toString('hex')
+				}).toString();
+
+			logger.info(`🔐 Redirecting user to Keycloak: ${keycloakAuthUrl}`);
+			res.redirect(keycloakAuthUrl);
+		});
+
+		// Keycloak OIDC callback endpoint
+		router.get('/keycloak-callback', async (req, res) => {
+			const { code } = req.query;
+			if (!code) {
+				logger.error('❌ Keycloak Callback: Missing code in query parameters');
+				return res.status(400).send('Missing authorization code');
+			}
+
+			try {
+				const redirectUri = `${PUBLIC_URL}/sso/keycloak-callback`;
+				const tokenUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token`;
+				
+				const clientSecret = env.KEYCLOAK_CLIENT_SECRET || env.AUTH_KEYCLOAK_CLIENT_SECRET || '';
+
+				logger.info(`🔄 Exchanging authorization code at Keycloak token endpoint...`);
+
+				const tokenParams = {
+					grant_type: 'authorization_code',
+					client_id: KEYCLOAK_CLIENT_ID,
+					code,
+					redirect_uri: redirectUri,
+				};
+
+				if (clientSecret) {
+					tokenParams.client_secret = clientSecret;
+				}
+
+				const tokenResponse = await fetch(tokenUrl, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+					body: new URLSearchParams(tokenParams).toString()
+				});
+
+				if (!tokenResponse.ok) {
+					const errText = await tokenResponse.text();
+					logger.error(`❌ Keycloak token exchange failed: ${errText}`);
+					throw new Error(`Token exchange failed: ${tokenResponse.status} - ${errText}`);
+				}
+
+				const tokens = await tokenResponse.json();
+				const keycloakAccessToken = tokens.access_token;
+				const keycloakRefreshToken = tokens.refresh_token;
+
+				if (!keycloakAccessToken) {
+					throw new Error('No access_token returned by Keycloak');
+				}
+
+				// Fetch Keycloak user profile info
+				logger.info(`👤 Fetching Keycloak user profile info...`);
+				const userinfoUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo`;
+				const profileResponse = await fetch(userinfoUrl, {
+					headers: { 'Authorization': `Bearer ${keycloakAccessToken}` }
+				});
+
+				if (!profileResponse.ok) {
+					const errText = await profileResponse.text();
+					logger.error(`❌ Keycloak userinfo request failed: ${errText}`);
+					throw new Error(`Failed to get user profile from Keycloak: ${profileResponse.status}`);
+				}
+
+				const profile = await profileResponse.json();
+				const email = profile.email;
+				const sub = profile.sub;
+
+				if (!email) {
+					throw new Error('Keycloak profile did not contain an email address');
+				}
+
+				// Find or create Directus user
+				const { UsersService } = services;
+				const schema = await getSchema();
+				const usersService = new UsersService({ schema, knex: database });
+
+				logger.info(`🔍 Finding or creating Directus user for email: ${email}`);
+				let existingUsers = await usersService.readByQuery({
+					filter: { email: { _eq: email } }
+				});
+
+				let user = existingUsers.length > 0 ? existingUsers[0] : null;
+
+				if (!user) {
+					logger.info(`✨ Creating new Directus user for: ${email}`);
+					const userId = await usersService.createOne({
+						email,
+						first_name: profile.given_name || 'Keycloak',
+						last_name: profile.family_name || 'User',
+						role: DEFAULT_ROLE_ID,
+						status: 'active',
+						provider: 'keycloak',
+						external_identifier: sub
+					});
+					user = await usersService.readOne(userId);
+				} else {
+					logger.info(`` + `✅ Found existing Directus user for: ${email}`);
+					// Ensure external ID and provider are set correctly
+					if (user.provider !== 'keycloak' || user.external_identifier !== sub) {
+						await usersService.updateOne(user.id, {
+							provider: 'keycloak',
+							external_identifier: sub
+						});
+					}
+				}
+
+				// Generate Directus session tokens
+				const payload = { id: user.id, role: user.role || DEFAULT_ROLE_ID, app_access: true, admin_access: false };
+				const sessionToken = jwt.sign(payload, env.SECRET, { expiresIn: '7d', issuer: 'directus' });
+				const refreshToken = jwt.sign({ id: user.id, type: 'refresh' }, env.SECRET, { expiresIn: '30d', issuer: 'directus' });
+
+				// Get the stored redirect info from cookie
+				let scheme = DEFAULT_SCHEME;
+				let path = MOBILE_APP_CALLBACK_PATH;
+				
+				const rawCookie = req.cookies?.sso_mobile_redirect || 
+					(req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('sso_mobile_redirect='))?.split('=')[1]);
+					
+				if (rawCookie) {
+					try {
+						const val = decodeURIComponent(rawCookie);
+						const redirectInfo = JSON.parse(val);
+						scheme = redirectInfo.scheme || scheme;
+						path = redirectInfo.path || path;
+					} catch (e) {
+						logger.error('⚠️ Failed to parse sso_mobile_redirect cookie:', e);
+					}
+				}
+
+				// Construct redirect URL back to the mobile app with both Directus and Keycloak tokens
+				const redirectUrl = new URL(`${scheme}://${path.replace(/^\/+/, '')}`);
+				redirectUrl.searchParams.set('access_token', sessionToken);
+				redirectUrl.searchParams.set('refresh_token', refreshToken);
+				redirectUrl.searchParams.set('expires', String(3600 * 24 * 7));
+				redirectUrl.searchParams.set('user_id', user.id);
+				redirectUrl.searchParams.set('email', email);
+				redirectUrl.searchParams.set('keycloak_access_token', keycloakAccessToken);
+				if (keycloakRefreshToken) {
+					redirectUrl.searchParams.set('keycloak_refresh_token', keycloakRefreshToken);
+				}
+
+				// Clear the redirect cookie
+				res.clearCookie('sso_mobile_redirect', {
+					httpOnly: true,
+					secure: COOKIE_SECURE,
+					sameSite: COOKIE_SAME_SITE,
+					path: '/',
+				});
+
+				logger.info(`🚀 Keycloak login successful. Redirecting back to mobile app: ${redirectUrl.toString()}`);
+				res.setHeader('Location', redirectUrl.toString());
+				return res.status(302).send(`<html><head><meta http-equiv="refresh" content="0;url=${redirectUrl.toString()}"></head><body>Redirecting to app...</body></html>`);
+			} catch (error) {
+				logger.error('❌ Error in keycloak-callback:', error);
+				
+				const scheme = getValidatedScheme(req);
+				const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+				const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INTERNAL_SERVER_ERROR&message=${encodeURIComponent(error.message)}`;
+
+				res.setHeader('Content-Type', 'text/html');
+				return res.status(500).send(renderFriendlyErrorPage(
+					'Authentication Error',
+					error.message || 'An unexpected error occurred during Keycloak callback exchange.',
+					'INTERNAL_SERVER_ERROR',
+					errorRedirectUrl
+				));
+			}
+		});
+
 		// Mobile callback endpoint
 		router.get('/mobile-callback', async (req, res) => {
 			const isBrowser = isBrowserRequest(req);
