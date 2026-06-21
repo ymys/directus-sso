@@ -382,7 +382,7 @@ export default {
 					headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 					body: new URLSearchParams({
 						grant_type: 'password',
-						client_id: KEYCLOAK_CLIENT_ID,
+						client_id: 'admin-cli',
 						username: KEYCLOAK_ADMIN_USER,
 						password: KEYCLOAK_ADMIN_PASSWORD,
 					}).toString(),
