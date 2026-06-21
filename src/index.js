@@ -781,6 +781,10 @@ export default {
 					throw new Error('Keycloak profile did not contain an email address');
 				}
 
+				// Dynamically select external_identifier key based on Directus OIDC native configuration
+				const KEYCLOAK_IDENTIFIER_KEY = env.AUTH_KEYCLOAK_IDENTIFIER_KEY || 'sub';
+				const keycloakIdentifier = KEYCLOAK_IDENTIFIER_KEY === 'email' ? email : sub;
+
 				// Find or create Directus user
 				const { UsersService } = services;
 				const schema = await getSchema();
@@ -802,16 +806,16 @@ export default {
 						role: DEFAULT_ROLE_ID,
 						status: 'active',
 						provider: 'keycloak',
-						external_identifier: sub
+						external_identifier: keycloakIdentifier
 					});
 					user = await usersService.readOne(userId);
 				} else {
 					logger.info(`` + `✅ Found existing Directus user for: ${email}`);
 					// Ensure external ID and provider are set correctly
-					if (user.provider !== 'keycloak' || user.external_identifier !== sub) {
+					if (user.provider !== 'keycloak' || user.external_identifier !== keycloakIdentifier) {
 						await usersService.updateOne(user.id, {
 							provider: 'keycloak',
-							external_identifier: sub
+							external_identifier: keycloakIdentifier
 						});
 					}
 				}
