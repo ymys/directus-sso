@@ -9,6 +9,27 @@ export default {
 	handler: (router, context) => {
 		const { env, logger, services, database, getSchema } = context;
 
+		// Create a temporary database table to hold short-lived exchange codes for Keycloak tokens
+		// This avoids sending huge Keycloak JWT tokens in the redirect Location header (preventing Nginx 502 Bad Gateway)
+		// and bypasses the iOS WebView user-gesture blocking restriction for custom deep-link schemes.
+		async function ensureTempTable() {
+			try {
+				const hasTable = await database.schema.hasTable('sso_keycloak_tokens');
+				if (!hasTable) {
+					await database.schema.createTable('sso_keycloak_tokens', (table) => {
+						table.string('code').primary();
+						table.text('access_token');
+						table.text('refresh_token');
+						table.timestamp('created_at').defaultTo(database.fn.now());
+					});
+					logger.info('💾 Created temporary table sso_keycloak_tokens');
+				}
+			} catch (err) {
+				logger.error('⚠️ Failed to ensure sso_keycloak_tokens table:', err);
+			}
+		}
+		ensureTempTable();
+
 		// ==========================================
 		// 1. KONFIGURASI ENVIRONMENT
 		// ==========================================
@@ -805,17 +826,24 @@ export default {
 					}
 				}
 
-				// Construct redirect URL back to the mobile app with both Directus and Keycloak tokens
+				// Generate a short-lived keycloak_code for mobile app exchange
+				const keycloakCode = crypto.randomBytes(16).toString('hex');
+				
+				logger.info(`💾 Saving Keycloak tokens to temporary exchange table with code: ${keycloakCode}`);
+				await database('sso_keycloak_tokens').insert({
+					code: keycloakCode,
+					access_token: keycloakAccessToken,
+					refresh_token: keycloakRefreshToken || ''
+				});
+
+				// Construct redirect URL back to the mobile app with Directus tokens and the exchange code
 				const redirectUrl = new URL(`${scheme}://${path.replace(/^\/+/, '')}`);
 				redirectUrl.searchParams.set('access_token', sessionToken);
 				redirectUrl.searchParams.set('refresh_token', refreshToken);
 				redirectUrl.searchParams.set('expires', String(3600 * 24 * 7));
 				redirectUrl.searchParams.set('user_id', user.id);
 				redirectUrl.searchParams.set('email', email);
-				redirectUrl.searchParams.set('keycloak_access_token', keycloakAccessToken);
-				if (keycloakRefreshToken) {
-					redirectUrl.searchParams.set('keycloak_refresh_token', keycloakRefreshToken);
-				}
+				redirectUrl.searchParams.set('keycloak_code', keycloakCode);
 
 				// Clear the redirect cookie
 				res.clearCookie('sso_mobile_redirect', {
@@ -825,78 +853,10 @@ export default {
 					path: '/',
 				});
 
-				logger.info(`🚀 Keycloak login successful. Sending HTML deep-link redirect page...`);
-				
-				// We return HTTP 200 with an HTML landing page that triggers the redirect client-side.
-				// This avoids "upstream sent too big header" (502 Bad Gateway) errors in Nginx caused by the large Keycloak JWT tokens in the Location header.
-				res.setHeader('Content-Type', 'text/html');
-				return res.status(200).send(`
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Redirecting...</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            background-color: #f8fafc;
-            margin: 0;
-        }
-        .card {
-            background: white;
-            padding: 32px;
-            border-radius: 16px;
-            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
-            text-align: center;
-            max-width: 360px;
-        }
-        h2 { color: #10b981; margin: 0 0 8px 0; }
-        p { color: #64748b; margin: 0 0 24px 0; }
-        .spinner {
-            border: 3px solid #f1f5f9;
-            border-top: 3px solid #10b981;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 24px auto;
-        }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .btn {
-            display: inline-block;
-            padding: 12px 24px;
-            background-color: #10b981;
-            color: white !important;
-            text-decoration: none;
-            border-radius: 8px;
-            font-weight: 500;
-        }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="spinner"></div>
-        <h2>Sinkronisasi Berhasil</h2>
-        <p>Mengalihkan kembali ke aplikasi Paramartha...</p>
-        <a href="${redirectUrl.toString()}" class="btn">Kembali ke Aplikasi</a>
-    </div>
-    <script>
-        // Trigger redirect instantly
-        window.location.replace("${redirectUrl.toString()}");
-        
-        // Fallback redirect on click
-        document.querySelector('.btn').addEventListener('click', function() {
-            window.location.href = "${redirectUrl.toString()}";
-        });
-    </script>
-</body>
-</html>
-				`);
+				// Since the URL size is now small (no raw Keycloak JWTs in URL),
+				// we can use standard 302 Redirect, which works seamlessly and does not trigger iOS pop-up blocks or Nginx 502 header limits!
+				logger.info(`🚀 Keycloak login successful. Redirecting back to mobile app via 302: ${redirectUrl.toString()}`);
+				return res.redirect(302, redirectUrl.toString());
 			} catch (error) {
 				logger.error('❌ Error in keycloak-callback:', error);
 				
@@ -911,6 +871,49 @@ export default {
 					'INTERNAL_SERVER_ERROR',
 					errorRedirectUrl
 				));
+			}
+		});
+
+		// Exchange short-lived code for Keycloak tokens
+		router.get('/keycloak-token', async (req, res) => {
+			const { code } = req.query;
+			if (!code) {
+				logger.error('❌ Keycloak Token exchange: Missing code parameter');
+				return res.status(400).json({ error: 'Missing code' });
+			}
+
+			try {
+				const row = await database('sso_keycloak_tokens')
+					.where('code', code)
+					.first();
+
+				if (!row) {
+					logger.error(`❌ Keycloak Token exchange: Code ${code} not found or expired`);
+					return res.status(404).json({ error: 'Code not found or expired' });
+				}
+
+				// Single-use: delete immediately
+				await database('sso_keycloak_tokens')
+					.where('code', code)
+					.delete();
+
+				// Async cleanup of old tokens (older than 10 minutes)
+				try {
+					const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+					await database('sso_keycloak_tokens')
+						.where('created_at', '<', tenMinutesAgo)
+						.delete();
+				} catch (cleanupErr) {}
+
+				logger.info(`✅ Keycloak tokens retrieved successfully for code: ${code}`);
+				return res.json({
+					success: true,
+					access_token: row.access_token,
+					refresh_token: row.refresh_token
+				});
+			} catch (error) {
+				logger.error('❌ Error exchanging Keycloak token code:', error);
+				return res.status(500).json({ error: error.message });
 			}
 		});
 
