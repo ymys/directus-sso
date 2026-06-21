@@ -57,6 +57,12 @@ export default {
 		const KEYCLOAK_ADMIN_PASSWORD = env.KEYCLOAK_ADMIN_PASSWORD || 'admin';
 		const PUBLIC_URL = env.PUBLIC_URL || 'http://localhost:8055';
 
+		const isKeycloakAdminConfigured = !!(
+			(env.KEYCLOAK_URL || env.AUTH_KEYCLOAK_ISSUER_URL) &&
+			env.KEYCLOAK_ADMIN_USER &&
+			env.KEYCLOAK_ADMIN_PASSWORD
+		);
+
 		// Multi-App Scheme
 		const rawSchemes = env.MOBILE_APP_SCHEME || 'finsnapp';
 		const ALLOWED_SCHEMES = Array.isArray(rawSchemes)
@@ -1146,7 +1152,7 @@ export default {
 					});
 				} catch (error) { }
 
-				if (userEmail) {
+				if (isKeycloakAdminConfigured && userEmail) {
 					try {
 						const adminToken = await getKeycloakAdminToken();
 						if (adminToken) {
@@ -1262,14 +1268,7 @@ export default {
 				//    If KEYCLOAK_URL is not in .env, env.KEYCLOAK_URL is undefined → falsy → skipped.
 				//    NOTE: env.KEYCLOAK_ADMIN_USER === 'admin' is NOT a reliable signal —
 				//    'admin' is the standard default Keycloak admin username for real setups.
-				const isKeycloakConfigured = !!(
-					env.KEYCLOAK_URL &&
-					env.KEYCLOAK_REALM &&
-					env.KEYCLOAK_ADMIN_USER &&
-					env.KEYCLOAK_ADMIN_PASSWORD
-				);
-
-				if (isKeycloakConfigured) {
+				if (isKeycloakAdminConfigured) {
 					try {
 						const adminToken = await getKeycloakAdminToken();
 						if (adminToken) {
