@@ -355,6 +355,28 @@ export default {
 				if (parsedUrl.origin === allowedOrigin) {
 					return url;
 				}
+
+				// 3. Share the same root domain check
+				const publicHost = new URL(PUBLIC_URL).hostname;
+				const redirectHost = parsedUrl.hostname;
+				
+				if (publicHost && redirectHost) {
+					const getRootDomain = (host) => {
+						const parts = host.split('.');
+						return parts.length >= 2 ? parts.slice(-2).join('.') : host;
+					};
+					if (getRootDomain(publicHost) === getRootDomain(redirectHost)) {
+						return url;
+					}
+				}
+
+				// 4. Cookie Domain check: Must be a subdomain of COOKIE_DOMAIN if set
+				if (COOKIE_DOMAIN) {
+					const normalizedCookieDomain = COOKIE_DOMAIN.startsWith('.') ? COOKIE_DOMAIN : `.${COOKIE_DOMAIN}`;
+					if (redirectHost === COOKIE_DOMAIN.replace(/^\./, '') || redirectHost.endsWith(normalizedCookieDomain)) {
+						return url;
+					}
+				}
 			} catch (e) {
 				// Fail silently and return fallback
 			}
