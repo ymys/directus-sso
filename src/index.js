@@ -377,6 +377,20 @@ export default {
 						return url;
 					}
 				}
+
+				// 5. Allow localhost, 127.0.0.1, and private IP address ranges
+				const isLocalOrPrivate = (host) => {
+					if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+					// Check for private IPv4 patterns (10.x.x.x, 192.168.x.x, 172.16.x.x - 172.31.x.x)
+					if (/^(10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)$/.test(host)) return true;
+					// Check for local network domains (e.g. *.local)
+					if (host.endsWith('.local')) return true;
+					return false;
+				};
+
+				if (isLocalOrPrivate(redirectHost)) {
+					return url;
+				}
 			} catch (e) {
 				// Fail silently and return fallback
 			}
@@ -455,6 +469,12 @@ export default {
 			if (redirectUri && typeof redirectUri === 'string') {
 				if (redirectUri.startsWith('http://') || redirectUri.startsWith('https://')) {
 					return true;
+				}
+				if (redirectUri.startsWith('/') && !redirectUri.startsWith('//') && !redirectUri.startsWith('/\\')) {
+					return true;
+				}
+				if (redirectUri.includes('://')) {
+					return false;
 				}
 			}
 
@@ -716,21 +736,18 @@ export default {
 
 		// Initiate Keycloak OIDC login flow directly through the extension
 		router.get('/login/keycloak', (req, res) => {
-			const isBrowser = isBrowserRequest(req);
+			let redirectUrl = req.query.redirect_uri || req.query.redirect;
 			
-			// Store the redirect info in a cookie so we know where to redirect after callback
-			let redirectCookieValue;
-			if (isBrowser) {
-				let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
-				redirectTo = getSafeRedirectUrl(redirectTo, '/');
-				redirectCookieValue = { type: 'browser', redirect: redirectTo };
+			if (redirectUrl) {
+				redirectUrl = getSafeRedirectUrl(redirectUrl);
 			} else {
 				const scheme = getValidatedScheme(req);
 				const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
-				redirectCookieValue = { type: 'mobile', scheme, path };
+				redirectUrl = `${scheme}://${path.replace(/^\/+/, '')}`;
 			}
 
-			res.cookie('sso_mobile_redirect', JSON.stringify(redirectCookieValue), {
+			// Store the redirect URL in a cookie so we know where to redirect after callback
+			res.cookie('sso_mobile_redirect', JSON.stringify({ redirect: redirectUrl }), {
 				httpOnly: true,
 				secure: COOKIE_SECURE,
 				sameSite: COOKIE_SAME_SITE,
@@ -866,11 +883,7 @@ export default {
 				const refreshToken = jwt.sign({ id: user.id, type: 'refresh' }, env.SECRET, { expiresIn: '30d', issuer: 'directus' });
 
 				// Get the stored redirect info from cookie
-				let isBrowser = false;
-				let webRedirectUrl = '/';
-				let scheme = DEFAULT_SCHEME;
-				let path = MOBILE_APP_CALLBACK_PATH;
-				
+				let redirectUrlString = '';
 				const rawCookie = req.cookies?.sso_mobile_redirect || 
 					(req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('sso_mobile_redirect='))?.split('=')[1]);
 					
@@ -878,64 +891,25 @@ export default {
 					try {
 						const val = decodeURIComponent(rawCookie);
 						const redirectInfo = JSON.parse(val);
-						if (redirectInfo.type === 'browser') {
-							isBrowser = true;
-							webRedirectUrl = redirectInfo.redirect || '/';
-						} else {
-							scheme = redirectInfo.scheme || scheme;
-							path = redirectInfo.path || path;
+						if (redirectInfo.redirect) {
+							redirectUrlString = redirectInfo.redirect;
+						} else if (redirectInfo.scheme) {
+							const scheme = redirectInfo.scheme;
+							const path = redirectInfo.path || MOBILE_APP_CALLBACK_PATH;
+							redirectUrlString = `${scheme}://${path.replace(/^\/+/, '')}`;
 						}
 					} catch (e) {
 						logger.error('⚠️ Failed to parse sso_mobile_redirect cookie:', e);
 					}
-				} else {
-					isBrowser = isBrowserRequest(req);
 				}
 
-				if (isBrowser) {
-					// Clear the redirect cookie
-					res.clearCookie('sso_mobile_redirect', {
-						httpOnly: true,
-						secure: COOKIE_SECURE,
-						sameSite: COOKIE_SAME_SITE,
-						path: '/',
-					});
-
-					// Set Directus session cookies in browser
-					res.cookie(SESSION_COOKIE_NAME, sessionToken, {
-						httpOnly: true,
-						secure: COOKIE_SECURE,
-						domain: COOKIE_DOMAIN,
-						sameSite: COOKIE_SAME_SITE,
-						maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-						path: '/',
-					});
-
-					if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
-						res.cookie(CORE_COOKIE_NAME, sessionToken, {
-							httpOnly: true,
-							secure: COOKIE_SECURE,
-							domain: COOKIE_DOMAIN,
-							sameSite: COOKIE_SAME_SITE,
-							maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-							path: '/',
-						});
-					}
-
-					res.cookie(REFRESH_TOKEN_COOKIE_NAME, refreshToken, {
-						httpOnly: true,
-						secure: COOKIE_SECURE,
-						domain: COOKIE_DOMAIN,
-						sameSite: COOKIE_SAME_SITE,
-						maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-						path: '/',
-					});
-
-					logger.info(`🚀 Keycloak login successful for web browser. Redirecting to: ${webRedirectUrl}`);
-					return res.redirect(webRedirectUrl);
+				if (!redirectUrlString) {
+					const scheme = DEFAULT_SCHEME;
+					const path = MOBILE_APP_CALLBACK_PATH;
+					redirectUrlString = `${scheme}://${path.replace(/^\/+/, '')}`;
 				}
 
-				// Generate a short-lived keycloak_code for mobile app exchange
+				// Generate a short-lived keycloak_code for client exchange
 				const keycloakCode = crypto.randomBytes(16).toString('hex');
 				
 				logger.info(`💾 Saving Keycloak tokens to temporary exchange table with code: ${keycloakCode}`);
@@ -946,8 +920,36 @@ export default {
 					id_token: keycloakIdToken || ''
 				});
 
-				// Construct redirect URL back to the mobile app with Directus tokens and the exchange code
-				const redirectUrl = new URL(`${scheme}://${path.replace(/^\/+/, '')}`);
+				// Construct redirect URL back to the client with Directus tokens and the exchange code
+				let redirectUrl;
+				try {
+					redirectUrl = new URL(redirectUrlString);
+				} catch (urlErr) {
+					// Fallback for custom schemes which might fail URL parser depending on node version
+					const hasParams = redirectUrlString.includes('?');
+					const separator = hasParams ? '&' : '?';
+					const mobileRedirect = `${redirectUrlString}${separator}` + 
+						new URLSearchParams({
+							access_token: sessionToken,
+							refresh_token: refreshToken,
+							expires: String(3600 * 24 * 7),
+							user_id: user.id,
+							email: email,
+							keycloak_code: keycloakCode
+						}).toString();
+
+					// Clear the redirect cookie
+					res.clearCookie('sso_mobile_redirect', {
+						httpOnly: true,
+						secure: COOKIE_SECURE,
+						sameSite: COOKIE_SAME_SITE,
+						path: '/',
+					});
+
+					logger.info(`🚀 Keycloak login successful (Custom Scheme). Redirecting to: ${mobileRedirect}`);
+					return res.redirect(302, mobileRedirect);
+				}
+
 				redirectUrl.searchParams.set('access_token', sessionToken);
 				redirectUrl.searchParams.set('refresh_token', refreshToken);
 				redirectUrl.searchParams.set('expires', String(3600 * 24 * 7));
@@ -963,16 +965,12 @@ export default {
 					path: '/',
 				});
 
-				// Since the URL size is now small (no raw Keycloak JWTs in URL),
-				// we can use standard 302 Redirect, which works seamlessly and does not trigger iOS pop-up blocks or Nginx 502 header limits!
-				logger.info(`🚀 Keycloak login successful. Redirecting back to mobile app via 302: ${redirectUrl.toString()}`);
+				logger.info(`🚀 Keycloak login successful. Redirecting back to client via 302: ${redirectUrl.toString()}`);
 				return res.redirect(302, redirectUrl.toString());
 			} catch (error) {
 				logger.error('❌ Error in keycloak-callback:', error);
 				
-				let isBrowser = false;
-				let errorRedirectUrl = null;
-
+				let redirectUrlString = '';
 				const rawCookie = req.cookies?.sso_mobile_redirect || 
 					(req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('sso_mobile_redirect='))?.split('=')[1]);
 					
@@ -980,21 +978,31 @@ export default {
 					try {
 						const val = decodeURIComponent(rawCookie);
 						const redirectInfo = JSON.parse(val);
-						if (redirectInfo.type === 'browser') {
-							isBrowser = true;
-							const webRedirectUrl = redirectInfo.redirect || '/';
-							const parsedUrl = new URL(webRedirectUrl, PUBLIC_URL);
-							parsedUrl.searchParams.set('error', 'INTERNAL_SERVER_ERROR');
-							parsedUrl.searchParams.set('message', error.message);
-							errorRedirectUrl = parsedUrl.toString();
+						if (redirectInfo.redirect) {
+							redirectUrlString = redirectInfo.redirect;
+						} else if (redirectInfo.scheme) {
+							const scheme = redirectInfo.scheme;
+							const path = redirectInfo.path || MOBILE_APP_CALLBACK_PATH;
+							redirectUrlString = `${scheme}://${path.replace(/^\/+/, '')}`;
 						}
 					} catch (e) {}
 				}
 
-				if (!errorRedirectUrl) {
-					const scheme = getValidatedScheme(req);
-					const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
-					errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INTERNAL_SERVER_ERROR&message=${encodeURIComponent(error.message)}`;
+				if (!redirectUrlString) {
+					const scheme = DEFAULT_SCHEME;
+					const path = MOBILE_APP_CALLBACK_PATH;
+					redirectUrlString = `${scheme}://${path.replace(/^\/+/, '')}`;
+				}
+
+				let errorRedirectUrl = redirectUrlString;
+				try {
+					const parsedUrl = new URL(redirectUrlString);
+					parsedUrl.searchParams.set('error', 'INTERNAL_SERVER_ERROR');
+					parsedUrl.searchParams.set('message', error.message);
+					errorRedirectUrl = parsedUrl.toString();
+				} catch (urlErr) {
+					const separator = redirectUrlString.includes('?') ? '&' : '?';
+					errorRedirectUrl = `${redirectUrlString}${separator}error=INTERNAL_SERVER_ERROR&message=${encodeURIComponent(error.message)}`;
 				}
 
 				res.setHeader('Content-Type', 'text/html');
