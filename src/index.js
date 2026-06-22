@@ -428,6 +428,14 @@ export default {
 			if (req.query.type === 'browser') return true;
 			if (req.query.type === 'mobile') return false;
 			if (req.query.app_scheme || req.query.app_path) return false;
+
+			const redirectUri = req.query.redirect_uri || req.query.redirect;
+			if (redirectUri && typeof redirectUri === 'string') {
+				if (redirectUri.startsWith('http://') || redirectUri.startsWith('https://')) {
+					return true;
+				}
+			}
+
 			const userAgent = req.headers['user-agent'] || '';
 			return /Mozilla|Chrome|Safari|Firefox|Edge|Opera/i.test(userAgent) &&
 				!/Mobile.*App|ReactNative|Expo/i.test(userAgent);
@@ -686,11 +694,21 @@ export default {
 
 		// Initiate Keycloak OIDC login flow directly through the extension
 		router.get('/login/keycloak', (req, res) => {
-			const scheme = getValidatedScheme(req);
-			const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+			const isBrowser = isBrowserRequest(req);
 			
-			// Store the app scheme and path in a cookie so we know where to redirect after callback
-			res.cookie('sso_mobile_redirect', JSON.stringify({ scheme, path }), {
+			// Store the redirect info in a cookie so we know where to redirect after callback
+			let redirectCookieValue;
+			if (isBrowser) {
+				let redirectTo = req.query.redirect_uri || req.query.redirect || '/';
+				redirectTo = getSafeRedirectUrl(redirectTo, '/');
+				redirectCookieValue = { type: 'browser', redirect: redirectTo };
+			} else {
+				const scheme = getValidatedScheme(req);
+				const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+				redirectCookieValue = { type: 'mobile', scheme, path };
+			}
+
+			res.cookie('sso_mobile_redirect', JSON.stringify(redirectCookieValue), {
 				httpOnly: true,
 				secure: COOKIE_SECURE,
 				sameSite: COOKIE_SAME_SITE,
@@ -826,6 +844,8 @@ export default {
 				const refreshToken = jwt.sign({ id: user.id, type: 'refresh' }, env.SECRET, { expiresIn: '30d', issuer: 'directus' });
 
 				// Get the stored redirect info from cookie
+				let isBrowser = false;
+				let webRedirectUrl = '/';
 				let scheme = DEFAULT_SCHEME;
 				let path = MOBILE_APP_CALLBACK_PATH;
 				
@@ -836,11 +856,61 @@ export default {
 					try {
 						const val = decodeURIComponent(rawCookie);
 						const redirectInfo = JSON.parse(val);
-						scheme = redirectInfo.scheme || scheme;
-						path = redirectInfo.path || path;
+						if (redirectInfo.type === 'browser') {
+							isBrowser = true;
+							webRedirectUrl = redirectInfo.redirect || '/';
+						} else {
+							scheme = redirectInfo.scheme || scheme;
+							path = redirectInfo.path || path;
+						}
 					} catch (e) {
 						logger.error('⚠️ Failed to parse sso_mobile_redirect cookie:', e);
 					}
+				} else {
+					isBrowser = isBrowserRequest(req);
+				}
+
+				if (isBrowser) {
+					// Clear the redirect cookie
+					res.clearCookie('sso_mobile_redirect', {
+						httpOnly: true,
+						secure: COOKIE_SECURE,
+						sameSite: COOKIE_SAME_SITE,
+						path: '/',
+					});
+
+					// Set Directus session cookies in browser
+					res.cookie(SESSION_COOKIE_NAME, sessionToken, {
+						httpOnly: true,
+						secure: COOKIE_SECURE,
+						domain: COOKIE_DOMAIN,
+						sameSite: COOKIE_SAME_SITE,
+						maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+						path: '/',
+					});
+
+					if (SESSION_COOKIE_NAME !== CORE_COOKIE_NAME) {
+						res.cookie(CORE_COOKIE_NAME, sessionToken, {
+							httpOnly: true,
+							secure: COOKIE_SECURE,
+							domain: COOKIE_DOMAIN,
+							sameSite: COOKIE_SAME_SITE,
+							maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+							path: '/',
+						});
+					}
+
+					res.cookie(REFRESH_TOKEN_COOKIE_NAME, refreshToken, {
+						httpOnly: true,
+						secure: COOKIE_SECURE,
+						domain: COOKIE_DOMAIN,
+						sameSite: COOKIE_SAME_SITE,
+						maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+						path: '/',
+					});
+
+					logger.info(`🚀 Keycloak login successful for web browser. Redirecting to: ${webRedirectUrl}`);
+					return res.redirect(webRedirectUrl);
 				}
 
 				// Generate a short-lived keycloak_code for mobile app exchange
@@ -878,9 +948,32 @@ export default {
 			} catch (error) {
 				logger.error('❌ Error in keycloak-callback:', error);
 				
-				const scheme = getValidatedScheme(req);
-				const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
-				const errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INTERNAL_SERVER_ERROR&message=${encodeURIComponent(error.message)}`;
+				let isBrowser = false;
+				let errorRedirectUrl = null;
+
+				const rawCookie = req.cookies?.sso_mobile_redirect || 
+					(req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('sso_mobile_redirect='))?.split('=')[1]);
+					
+				if (rawCookie) {
+					try {
+						const val = decodeURIComponent(rawCookie);
+						const redirectInfo = JSON.parse(val);
+						if (redirectInfo.type === 'browser') {
+							isBrowser = true;
+							const webRedirectUrl = redirectInfo.redirect || '/';
+							const parsedUrl = new URL(webRedirectUrl, PUBLIC_URL);
+							parsedUrl.searchParams.set('error', 'INTERNAL_SERVER_ERROR');
+							parsedUrl.searchParams.set('message', error.message);
+							errorRedirectUrl = parsedUrl.toString();
+						}
+					} catch (e) {}
+				}
+
+				if (!errorRedirectUrl) {
+					const scheme = getValidatedScheme(req);
+					const path = req.query.app_path || MOBILE_APP_CALLBACK_PATH;
+					errorRedirectUrl = `${scheme}://${path.replace(/^\/+/, '')}?error=INTERNAL_SERVER_ERROR&message=${encodeURIComponent(error.message)}`;
+				}
 
 				res.setHeader('Content-Type', 'text/html');
 				return res.status(500).send(renderFriendlyErrorPage(
