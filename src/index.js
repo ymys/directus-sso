@@ -841,18 +841,34 @@ export default {
 				// Dynamically select external_identifier key based on Directus OIDC native configuration
 				const KEYCLOAK_IDENTIFIER_KEY = env.AUTH_KEYCLOAK_IDENTIFIER_KEY || 'sub';
 				const keycloakIdentifier = KEYCLOAK_IDENTIFIER_KEY === 'email' ? email : sub;
+				const AUTH_KEYCLOAK_FIND = env.AUTH_KEYCLOAK_FIND || 'email';
+				const lookupField = AUTH_KEYCLOAK_FIND;
+				const lookupValue = lookupField === 'email' ? email : keycloakIdentifier;
 
 				// Find or create Directus user
 				const { UsersService } = services;
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
 
-				logger.info(`🔍 Finding or creating Directus user for email: ${email}`);
+				logger.info(`🔍 Finding or creating Directus user by ${lookupField}: ${lookupValue}`);
 				let existingUsers = await usersService.readByQuery({
-					filter: { email: { _eq: email } }
+					filter: { [lookupField]: { _eq: lookupValue } }
 				});
 
 				let user = existingUsers.length > 0 ? existingUsers[0] : null;
+				let foundViaFallback = false;
+
+				// Fallback to email lookup if lookup field was not email and user was not found
+				if (!user && lookupField !== 'email') {
+					logger.info(`🔍 User not found by ${lookupField}. Falling back to email search: ${email}`);
+					existingUsers = await usersService.readByQuery({
+						filter: { email: { _eq: email } }
+					});
+					if (existingUsers.length > 0) {
+						user = existingUsers[0];
+						foundViaFallback = true;
+					}
+				}
 
 				if (!user) {
 					logger.info(`✨ Creating new Directus user for: ${email}`);
@@ -867,7 +883,11 @@ export default {
 					});
 					user = await usersService.readOne(userId);
 				} else {
-					logger.info(`` + `✅ Found existing Directus user for: ${email}`);
+					if (foundViaFallback) {
+						logger.info(`✅ Found existing Directus user by email fallback: ${email}`);
+					} else {
+						logger.info(`✅ Found existing Directus user by ${lookupField}: ${lookupValue}`);
+					}
 					// Ensure external ID and provider are set correctly
 					if (user.provider !== 'keycloak' || user.external_identifier !== keycloakIdentifier) {
 						await usersService.updateOne(user.id, {
