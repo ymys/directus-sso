@@ -433,17 +433,42 @@ export default {
 			}
 		}
 
-		async function getKeycloakUserId(adminToken, email) {
+		async function getKeycloakUserId(adminToken, identifier) {
+			if (!identifier) return null;
 			try {
-				const response = await fetch(
-					`${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?email=${encodeURIComponent(email)}`,
+				// 1. Try direct ID lookup if identifier looks like a Keycloak UUID / sub
+				const directRes = await fetch(
+					`${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(identifier)}`,
 					{ headers: { 'Authorization': `Bearer ${adminToken}` } }
 				);
-				if (!response.ok) throw new Error('Failed to get user');
-				const users = await response.json();
-				return users.length > 0 ? users[0].id : null;
+				if (directRes.ok) {
+					const directUser = await directRes.json();
+					if (directUser && directUser.id) return directUser.id;
+				}
+
+				// 2. Search by email
+				const response = await fetch(
+					`${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?email=${encodeURIComponent(identifier)}`,
+					{ headers: { 'Authorization': `Bearer ${adminToken}` } }
+				);
+				if (response.ok) {
+					const users = await response.json();
+					if (users.length > 0) return users[0].id;
+				}
+
+				// 3. Search by username
+				const usernameRes = await fetch(
+					`${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?username=${encodeURIComponent(identifier)}`,
+					{ headers: { 'Authorization': `Bearer ${adminToken}` } }
+				);
+				if (usernameRes.ok) {
+					const usersByUsername = await usernameRes.json();
+					if (usersByUsername.length > 0) return usersByUsername[0].id;
+				}
+
+				return null;
 			} catch (error) {
-				logger.error('Error getting user ID:', error);
+				logger.error('Error getting Keycloak user ID:', error);
 				return null;
 			}
 		}
@@ -1300,11 +1325,15 @@ export default {
 				if (!token) return res.status(400).json({ error: 'No token provided' });
 
 				let userEmail = null;
+				let externalId = null;
+				let provider = null;
 				try {
 					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, { headers: { 'Authorization': `Bearer ${token}` } });
 					if (meResponse.ok) {
 						const userData = await meResponse.json();
-						userEmail = userData.data.email;
+						userEmail = userData.data?.email || null;
+						externalId = userData.data?.external_identifier || null;
+						provider = userData.data?.provider || null;
 					}
 				} catch (error) { }
 
@@ -1316,14 +1345,22 @@ export default {
 					});
 				} catch (error) { }
 
-				if (isKeycloakAdminConfigured && userEmail) {
+				if (isKeycloakAdminConfigured) {
 					try {
 						const adminToken = await getKeycloakAdminToken();
 						if (adminToken) {
-							const userId = await getKeycloakUserId(adminToken, userEmail);
-							if (userId) await logoutKeycloakUser(adminToken, userId);
+							const targetKeycloakId = (provider === 'keycloak' && externalId)
+								? externalId
+								: await getKeycloakUserId(adminToken, externalId || userEmail);
+
+							if (targetKeycloakId) {
+								await logoutKeycloakUser(adminToken, targetKeycloakId);
+								logger.info(`[SSO] Successfully logged out Keycloak user: ${targetKeycloakId}`);
+							}
 						}
-					} catch (error) { }
+					} catch (error) {
+						logger.error('[SSO] Keycloak logout error in mobile-logout:', error);
+					}
 				}
 				res.json({ success: true, message: 'Logged out successfully' });
 			} catch (error) {
@@ -1338,31 +1375,32 @@ export default {
 				const token = authHeader?.replace('Bearer ', '');
 				if (!token) return res.status(400).json({ error: 'No token provided' });
 
-				// 1. Verify user token and get their profile
+				// 1. Verify user identity via Directus /users/me
 				let userId = null;
 				let userEmail = null;
+				let externalId = null;
+				let provider = null;
+
 				try {
-					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
-						headers: { 'Authorization': `Bearer ${token}` }
-					});
+					const meResponse = await fetch(`${PUBLIC_URL}/users/me`, { headers: { 'Authorization': `Bearer ${token}` } });
 					if (meResponse.ok) {
 						const userData = await meResponse.json();
-						userId = userData.data.id;
-						userEmail = userData.data.email;
+						userId = userData.data?.id;
+						userEmail = userData.data?.email || null;
+						externalId = userData.data?.external_identifier || null;
+						provider = userData.data?.provider || null;
 					}
 				} catch (error) {
 					logger.error('[SSO] Error verifying token during account deletion:', error);
 				}
 
-				if (!userId || !userEmail) {
+				if (!userId) {
 					return res.status(401).json({ error: 'Invalid or expired token' });
 				}
 
-				logger.info(`[SSO] Deleting account for user: ${userId} (${userEmail})`);
+				logger.info(`[SSO] Deleting account for user: ${userId} (${userEmail || 'no-email'})`);
 
 				// 2. Call Directus /auth/logout FIRST — while the session is still active.
-				//    This is important: if we delete from DB first, /auth/logout returns 401
-				//    and can't clean up server-side state cleanly.
 				let directusLogoutOk = false;
 				try {
 					const logoutRes = await fetch(`${PUBLIC_URL}/auth/logout`, {
@@ -1380,11 +1418,8 @@ export default {
 				}
 
 				// 3. Delete ALL remaining sessions for this user from the DB.
-				//    We do this after /auth/logout so that logout can run cleanly,
-				//    but we still purge everything to cover refresh tokens and other sessions.
 				let deletedSessionsCount = 0;
 				try {
-					// 3a. Delete by the exact session token embedded in the JWT
 					const decoded = jwt.decode(token);
 					const sessionToken = decoded?.session;
 					if (sessionToken) {
@@ -1392,18 +1427,32 @@ export default {
 							.where('token', sessionToken)
 							.delete();
 						deletedSessionsCount += byToken;
-						logger.info(`[SSO] Deleted ${byToken} session(s) by token for user ${userId}`);
 					}
-					// 3b. Delete any other sessions (refresh tokens, concurrent sessions)
 					const byUser = await database('directus_sessions')
 						.where('user', userId)
 						.delete();
 					deletedSessionsCount += byUser;
-					if (byUser > 0) {
-						logger.info(`[SSO] Deleted ${byUser} additional session(s) by user ID for ${userId}`);
-					}
 				} catch (sessionError) {
 					logger.error('[SSO] Error deleting sessions:', sessionError);
+				}
+
+				// Keycloak Admin logout BEFORE soft-deleting user & clearing external_identifier
+				if (isKeycloakAdminConfigured) {
+					try {
+						const adminToken = await getKeycloakAdminToken();
+						if (adminToken) {
+							const targetKeycloakId = (provider === 'keycloak' && externalId)
+								? externalId
+								: await getKeycloakUserId(adminToken, externalId || userEmail);
+
+							if (targetKeycloakId) {
+								await logoutKeycloakUser(adminToken, targetKeycloakId);
+								logger.info(`[SSO] Logged out user ${targetKeycloakId} from Keycloak`);
+							}
+						}
+					} catch (keycloakError) {
+						logger.error('[SSO] Keycloak logout error:', keycloakError);
+					}
 				}
 
 				// 4. Suspend + anonymise the user record
@@ -1412,40 +1461,19 @@ export default {
 				const usersService = new UsersService({ schema, knex: database });
 
 				const timestamp = Date.now();
-				const deletedEmail = `DELETED_${timestamp}_${userEmail}`;
+				const deletedEmail = `DELETED_${timestamp}_${userEmail || 'noemail'}`;
 
 				await usersService.updateOne(userId, {
 					first_name: 'DELETED',
 					last_name: 'ACCOUNT',
 					status: 'suspended',
 					email: deletedEmail,
-					// Clear the external_identifier so a new Google/Apple account
-					// with the same email can re-register without conflicts.
 					external_identifier: null,
 					provider: 'default',
 				});
 
 				logger.info(`[SSO] Soft-deleted user ${userId} → ${deletedEmail}, sessions cleared: ${deletedSessionsCount}, directus logout: ${directusLogoutOk}`);
 
-				// 5. Keycloak logout — ONLY if Keycloak is actually configured.
-				//    We check env.KEYCLOAK_URL directly (not the local constant which has a fallback).
-				//    If KEYCLOAK_URL is not in .env, env.KEYCLOAK_URL is undefined → falsy → skipped.
-				//    NOTE: env.KEYCLOAK_ADMIN_USER === 'admin' is NOT a reliable signal —
-				//    'admin' is the standard default Keycloak admin username for real setups.
-				if (isKeycloakAdminConfigured) {
-					try {
-						const adminToken = await getKeycloakAdminToken();
-						if (adminToken) {
-							const keycloakUserId = await getKeycloakUserId(adminToken, userEmail);
-							if (keycloakUserId) {
-								await logoutKeycloakUser(adminToken, keycloakUserId);
-								logger.info(`[SSO] Logged out user ${userEmail} from Keycloak`);
-							}
-						}
-					} catch (keycloakError) {
-						logger.error('[SSO] Keycloak logout error:', keycloakError);
-					}
-				}
 
 				// 6. Return a browser_logout_url that the mobile app MUST open in the browser.
 				//    Rationale: Directus validates JWTs stateless-ly (signature + expiry only).
