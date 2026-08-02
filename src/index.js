@@ -832,36 +832,31 @@ export default {
 				}
 
 				const profile = await profileResponse.json();
-				const email = profile.email;
+				const email = profile.email || null;
 				const sub = profile.sub;
 
-				if (!email) {
-					throw new Error('Keycloak profile did not contain an email address');
+				if (!sub) {
+					throw new Error('Keycloak profile did not contain a sub (subject) identifier');
 				}
 
-				// Dynamically select external_identifier key based on Directus OIDC native configuration
-				const KEYCLOAK_IDENTIFIER_KEY = env.AUTH_KEYCLOAK_IDENTIFIER_KEY || 'sub';
-				const keycloakIdentifier = KEYCLOAK_IDENTIFIER_KEY === 'email' ? email : sub;
-				const AUTH_KEYCLOAK_FIND = env.AUTH_KEYCLOAK_FIND || 'email';
-				const lookupField = AUTH_KEYCLOAK_FIND;
-				const lookupValue = lookupField === 'email' ? email : keycloakIdentifier;
+				const keycloakIdentifier = sub;
 
-				// Find or create Directus user
+				// Find or create Directus user using sub (external_identifier) as primary key
 				const { UsersService } = services;
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
 
-				logger.info(`🔍 Finding or creating Directus user by ${lookupField}: ${lookupValue}`);
+				logger.info(`🔍 Finding Directus user by external_identifier (sub): ${sub}`);
 				let existingUsers = await usersService.readByQuery({
-					filter: { [lookupField]: { _eq: lookupValue } }
+					filter: { external_identifier: { _eq: sub } }
 				});
 
 				let user = existingUsers.length > 0 ? existingUsers[0] : null;
 				let foundViaFallback = false;
 
-				// Fallback to email lookup if lookup field was not email and user was not found
-				if (!user && lookupField !== 'email') {
-					logger.info(`🔍 User not found by ${lookupField}. Falling back to email search: ${email}`);
+				// Fallback to email lookup if user was not found by sub AND email exists in Keycloak
+				if (!user && email) {
+					logger.info(`🔍 User not found by external_identifier. Falling back to email search: ${email}`);
 					existingUsers = await usersService.readByQuery({
 						filter: { email: { _eq: email } }
 					});
@@ -872,29 +867,41 @@ export default {
 				}
 
 				if (!user) {
-					logger.info(`✨ Creating new Directus user for: ${email}`);
-					const userId = await usersService.createOne({
-						email,
+					logger.info(`✨ Creating new Directus user for sub: ${sub}${email ? ` (email: ${email})` : ''}`);
+					const newUserPayload = {
 						first_name: profile.given_name || 'Keycloak',
 						last_name: profile.family_name || 'User',
 						role: DEFAULT_ROLE_ID,
 						status: 'active',
 						provider: 'keycloak',
-						external_identifier: keycloakIdentifier
-					});
+						external_identifier: sub
+					};
+					if (email) {
+						newUserPayload.email = email;
+					}
+					const userId = await usersService.createOne(newUserPayload);
 					user = await usersService.readOne(userId);
 				} else {
 					if (foundViaFallback) {
 						logger.info(`✅ Found existing Directus user by email fallback: ${email}`);
 					} else {
-						logger.info(`✅ Found existing Directus user by ${lookupField}: ${lookupValue}`);
+						logger.info(`✅ Found existing Directus user by external_identifier (sub): ${sub}`);
 					}
-					// Ensure external ID and provider are set correctly
-					if (user.provider !== 'keycloak' || user.external_identifier !== keycloakIdentifier) {
-						await usersService.updateOne(user.id, {
-							provider: 'keycloak',
-							external_identifier: keycloakIdentifier
-						});
+
+					// Prepare updates for existing user if provider/identifier or email changed
+					const updateData = {};
+					if (user.provider !== 'keycloak' || user.external_identifier !== sub) {
+						updateData.provider = 'keycloak';
+						updateData.external_identifier = sub;
+					}
+					if (email && user.email !== email) {
+						logger.info(`📧 Updating Directus user email from '${user.email}' to '${email}'`);
+						updateData.email = email;
+					}
+
+					if (Object.keys(updateData).length > 0) {
+						await usersService.updateOne(user.id, updateData);
+						Object.assign(user, updateData);
 					}
 				}
 
