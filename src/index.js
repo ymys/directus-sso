@@ -2,6 +2,7 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import jwt from 'jsonwebtoken';
 
 export default {
@@ -1687,6 +1688,122 @@ export default {
 			}
 
 			return res.redirect(targetRedirect);
+		});
+
+		router.get('/google-analytics/menu-stats', async (req, res) => {
+			const authHeader = req.headers.authorization;
+			const token = authHeader && authHeader.split(' ')[1];
+			if (!token) {
+				return res.status(401).json({ error: 'Unauthorized' });
+			}
+
+			// Validate token with Directus users/me
+			try {
+				const meResponse = await fetch(`${PUBLIC_URL}/users/me`, {
+					headers: { 'Authorization': `Bearer ${token}` }
+				});
+				if (!meResponse.ok) {
+					return res.status(401).json({ error: 'Invalid token' });
+				}
+			} catch (err) {
+				return res.status(401).json({ error: 'Token validation failed' });
+			}
+
+			// Parse service account info from env variable or file
+			let serviceAccount;
+			try {
+				if (env.GA_SERVICE_ACCOUNT_JSON) {
+					serviceAccount = JSON.parse(env.GA_SERVICE_ACCOUNT_JSON);
+				} else if (env.GA_SERVICE_ACCOUNT_FILE) {
+					serviceAccount = JSON.parse(fs.readFileSync(env.GA_SERVICE_ACCOUNT_FILE, 'utf8'));
+				}
+			} catch (err) {
+				logger.error('⚠️ Failed to parse GA service account credentials:', err);
+			}
+
+			if (!serviceAccount || !serviceAccount.client_email || !serviceAccount.private_key) {
+				return res.status(500).json({
+					error: 'Google Analytics credentials not configured on the server',
+					details: 'Please set GA_SERVICE_ACCOUNT_JSON or GA_SERVICE_ACCOUNT_FILE env variables.'
+				});
+			}
+
+			try {
+				// Sign JWT for Google OAuth bearer token request
+				const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+				const now = Math.floor(Date.now() / 1000);
+				const payload = Buffer.from(JSON.stringify({
+					iss: serviceAccount.client_email,
+					scope: 'https://www.googleapis.com/auth/analytics.readonly',
+					aud: 'https://oauth2.googleapis.com/token',
+					exp: now + 3600,
+					iat: now
+				})).toString('base64url');
+
+				const signatureInput = `${header}.${payload}`;
+				const signer = crypto.createSign('RSA-SHA256');
+				signer.update(signatureInput);
+				const signature = signer.sign(serviceAccount.private_key, 'base64url');
+				const jwtToken = `${signatureInput}.${signature}`;
+
+				// Fetch Access Token from Google OAuth endpoint
+				const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+					body: new URLSearchParams({
+						grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+						assertion: jwtToken
+					})
+				});
+				if (!tokenRes.ok) {
+					const errText = await tokenRes.text();
+					throw new Error(`Google OAuth failure: ${errText}`);
+				}
+				const tokenData = await tokenRes.json();
+				const accessToken = tokenData.access_token;
+
+				// Request report from GA4 Property
+				const propertyId = env.GA_PROPERTY_ID || '353061378';
+				const gaRes = await fetch(`https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`, {
+					method: 'POST',
+					headers: {
+						'Authorization': `Bearer ${accessToken}`,
+						'Content-Type': 'application/json'
+					},
+					body: JSON.stringify({
+						dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
+						dimensions: [{ name: 'pageTitle' }],
+						metrics: [{ name: 'screenPageViews' }]
+					})
+				});
+
+				if (!gaRes.ok) {
+					const errText = await gaRes.text();
+					throw new Error(`GA4 API failure: ${errText}`);
+				}
+
+				const gaData = await gaRes.json();
+
+				// Map report page views
+				const stats = {};
+				if (gaData.rows) {
+					for (const row of gaData.rows) {
+						const pageTitle = row.dimensionValues[0].value;
+						const views = parseInt(row.metricValues[0].value, 10) || 0;
+						stats[pageTitle] = (stats[pageTitle] || 0) + views;
+					}
+				}
+
+				return res.json({
+					success: true,
+					propertyId,
+					stats
+				});
+
+			} catch (err) {
+				logger.error('❌ Error fetching GA4 reports:', err);
+				return res.status(500).json({ error: 'GA4 fetching failure', message: err.message });
+			}
 		});
 
 	}
