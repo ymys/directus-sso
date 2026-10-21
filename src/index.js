@@ -859,6 +859,7 @@ export default {
 				const profile = await profileResponse.json();
 				const email = profile.email || null;
 				const sub = profile.sub;
+				const preferredUsername = profile.preferred_username || null;
 
 				if (!sub) {
 					throw new Error('Keycloak profile did not contain a sub (subject) identifier');
@@ -866,33 +867,56 @@ export default {
 
 				const keycloakIdentifier = sub;
 
-				// Find or create Directus user using sub (external_identifier) as primary key
+				// Find or create Directus user
 				const { UsersService } = services;
 				const schema = await getSchema();
 				const usersService = new UsersService({ schema, knex: database });
 
-				logger.info(`🔍 Finding Directus user by external_identifier (sub): ${sub}`);
-				let existingUsers = await usersService.readByQuery({
-					filter: { external_identifier: { _eq: sub } }
-				});
+				let user = null;
+				let matchReason = null;
 
-				let user = existingUsers.length > 0 ? existingUsers[0] : null;
-				let foundViaFallback = false;
+				// 1. Primary Priority: Match by permanent UID (preferred_username)
+				if (preferredUsername) {
+					logger.info(`🔍 Finding Directus user by uid (preferred_username): ${preferredUsername}`);
+					try {
+						const usersByUid = await usersService.readByQuery({
+							filter: { uid: { _eq: preferredUsername } }
+						});
+						if (usersByUid.length > 0) {
+							user = usersByUid[0];
+							matchReason = `uid (${preferredUsername})`;
+						}
+					} catch (uidErr) {
+						logger.error(`⚠️ Error searching user by uid: ${uidErr.message}`);
+					}
+				}
 
-				// Fallback to email lookup if user was not found by sub AND email exists in Keycloak
+				// 2. Secondary Priority: Match by sub (external_identifier)
+				if (!user && sub) {
+					logger.info(`🔍 User not found by uid. Trying external_identifier (sub): ${sub}`);
+					const usersBySub = await usersService.readByQuery({
+						filter: { external_identifier: { _eq: sub } }
+					});
+					if (usersBySub.length > 0) {
+						user = usersBySub[0];
+						matchReason = `external_identifier (${sub})`;
+					}
+				}
+
+				// 3. Fallback: Match by email
 				if (!user && email) {
-					logger.info(`🔍 User not found by external_identifier. Falling back to email search: ${email}`);
-					existingUsers = await usersService.readByQuery({
+					logger.info(`🔍 User not found by uid or sub. Falling back to email search: ${email}`);
+					const usersByEmail = await usersService.readByQuery({
 						filter: { email: { _eq: email } }
 					});
-					if (existingUsers.length > 0) {
-						user = existingUsers[0];
-						foundViaFallback = true;
+					if (usersByEmail.length > 0) {
+						user = usersByEmail[0];
+						matchReason = `email (${email})`;
 					}
 				}
 
 				if (!user) {
-					logger.info(`✨ Creating new Directus user for sub: ${sub}${email ? ` (email: ${email})` : ''}`);
+					logger.info(`✨ Creating new Directus user for uid: ${preferredUsername}, sub: ${sub}${email ? ` (email: ${email})` : ''}`);
 					const newUserPayload = {
 						first_name: profile.given_name || 'Keycloak',
 						last_name: profile.family_name || 'User',
@@ -901,19 +925,18 @@ export default {
 						provider: 'keycloak',
 						external_identifier: sub
 					};
+					if (preferredUsername) {
+						newUserPayload.uid = preferredUsername;
+					}
 					if (email) {
 						newUserPayload.email = email;
 					}
 					const userId = await usersService.createOne(newUserPayload);
 					user = await usersService.readOne(userId);
 				} else {
-					if (foundViaFallback) {
-						logger.info(`✅ Found existing Directus user by email fallback: ${email}`);
-					} else {
-						logger.info(`✅ Found existing Directus user by external_identifier (sub): ${sub}`);
-					}
+					logger.info(`✅ Found existing Directus user by ${matchReason}`);
 
-					// Prepare updates for existing user if provider/identifier or email changed
+					// Prepare updates for existing user if provider, external_identifier (sub), email, or uid changed
 					const updateData = {};
 					if (user.provider !== 'keycloak' || user.external_identifier !== sub) {
 						updateData.provider = 'keycloak';
@@ -922,6 +945,10 @@ export default {
 					if (email && user.email !== email) {
 						logger.info(`📧 Updating Directus user email from '${user.email}' to '${email}'`);
 						updateData.email = email;
+					}
+					if (preferredUsername && user.uid !== preferredUsername) {
+						logger.info(`🆔 Updating Directus user uid from '${user.uid}' to '${preferredUsername}'`);
+						updateData.uid = preferredUsername;
 					}
 
 					if (Object.keys(updateData).length > 0) {
@@ -981,15 +1008,20 @@ export default {
 					// Fallback for custom schemes which might fail URL parser depending on node version
 					const hasParams = redirectUrlString.includes('?');
 					const separator = hasParams ? '&' : '?';
+					const redirectParams = {
+						access_token: sessionToken,
+						refresh_token: refreshToken,
+						expires: String(3600 * 24 * 7),
+						user_id: user.id,
+						email: user.email || email || '',
+						keycloak_code: keycloakCode
+					};
+					if (user.uid) {
+						redirectParams.uid = user.uid;
+					}
+
 					const mobileRedirect = `${redirectUrlString}${separator}` + 
-						new URLSearchParams({
-							access_token: sessionToken,
-							refresh_token: refreshToken,
-							expires: String(3600 * 24 * 7),
-							user_id: user.id,
-							email: email,
-							keycloak_code: keycloakCode
-						}).toString();
+						new URLSearchParams(redirectParams).toString();
 
 					// Clear the redirect cookie
 					res.clearCookie('sso_mobile_redirect', {
@@ -1007,8 +1039,11 @@ export default {
 				redirectUrl.searchParams.set('refresh_token', refreshToken);
 				redirectUrl.searchParams.set('expires', String(3600 * 24 * 7));
 				redirectUrl.searchParams.set('user_id', user.id);
-				redirectUrl.searchParams.set('email', email);
+				redirectUrl.searchParams.set('email', user.email || email || '');
 				redirectUrl.searchParams.set('keycloak_code', keycloakCode);
+				if (user.uid) {
+					redirectUrl.searchParams.set('uid', user.uid);
+				}
 
 				// Clear the redirect cookie
 				res.clearCookie('sso_mobile_redirect', {
