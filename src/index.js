@@ -859,7 +859,7 @@ export default {
 				const profile = await profileResponse.json();
 				const email = profile.email || null;
 				const sub = profile.sub;
-				const preferredUsername = profile.preferred_username || null;
+				const preferredUsername = profile.preferred_username ? String(profile.preferred_username).trim() : null;
 
 				if (!sub) {
 					throw new Error('Keycloak profile did not contain a sub (subject) identifier');
@@ -875,16 +875,46 @@ export default {
 				let user = null;
 				let matchReason = null;
 
-				// 1. Primary Priority: Match by permanent UID (preferred_username)
+				// 1. Primary Priority: Match by permanent UID (preferred_username) case-insensitively
 				if (preferredUsername) {
-					logger.info(`🔍 Finding Directus user by uid (preferred_username): ${preferredUsername}`);
+					logger.info(`🔍 Finding Directus user by uid (preferred_username, case-insensitive): ${preferredUsername}`);
 					try {
-						const usersByUid = await usersService.readByQuery({
-							filter: { uid: { _eq: preferredUsername } }
-						});
-						if (usersByUid.length > 0) {
-							user = usersByUid[0];
-							matchReason = `uid (${preferredUsername})`;
+						let matchedUserId = null;
+						let matchedUserUid = null;
+
+						// Primary: Direct database query using LOWER(uid) = LOWER(?) for robust case-insensitive matching
+						if (database) {
+							const matchedRow = await database('directus_users')
+								.select('id', 'uid')
+								.whereRaw('LOWER(uid) = LOWER(?)', [preferredUsername])
+								.first();
+							if (matchedRow) {
+								matchedUserId = matchedRow.id;
+								matchedUserUid = matchedRow.uid;
+								logger.info(`🎯 Found Directus user via database LOWER(uid): '${matchedRow.uid}' (id: ${matchedRow.id})`);
+							}
+						}
+
+						// Fallback: If not found via database query, try usersService with _icontains
+						if (!matchedUserId) {
+							const candidates = await usersService.readByQuery({
+								filter: { uid: { _icontains: preferredUsername } },
+								fields: ['*'],
+								limit: 50
+							});
+							const exactMatch = candidates.find(
+								(u) => u.uid && String(u.uid).trim().toLowerCase() === preferredUsername.toLowerCase()
+							);
+							if (exactMatch) {
+								matchedUserId = exactMatch.id;
+								matchedUserUid = exactMatch.uid;
+								logger.info(`🎯 Found Directus user via usersService _icontains: '${exactMatch.uid}' (id: ${exactMatch.id})`);
+							}
+						}
+
+						if (matchedUserId) {
+							user = await usersService.readOne(matchedUserId, { fields: ['*'] });
+							matchReason = `uid (${matchedUserUid || user.uid})`;
 						}
 					} catch (uidErr) {
 						logger.error(`⚠️ Error searching user by uid: ${uidErr.message}`);
@@ -894,24 +924,55 @@ export default {
 				// 2. Secondary Priority: Match by sub (external_identifier)
 				if (!user && sub) {
 					logger.info(`🔍 User not found by uid. Trying external_identifier (sub): ${sub}`);
-					const usersBySub = await usersService.readByQuery({
-						filter: { external_identifier: { _eq: sub } }
-					});
-					if (usersBySub.length > 0) {
-						user = usersBySub[0];
-						matchReason = `external_identifier (${sub})`;
+					try {
+						const usersBySub = await usersService.readByQuery({
+							filter: { external_identifier: { _eq: sub } },
+							fields: ['*']
+						});
+						if (usersBySub.length > 0) {
+							user = usersBySub[0];
+							matchReason = `external_identifier (${sub})`;
+						}
+					} catch (subErr) {
+						logger.error(`⚠️ Error searching user by external_identifier: ${subErr.message}`);
 					}
 				}
 
-				// 3. Fallback: Match by email
+				// 3. Fallback: Match by email (case-insensitive)
 				if (!user && email) {
 					logger.info(`🔍 User not found by uid or sub. Falling back to email search: ${email}`);
-					const usersByEmail = await usersService.readByQuery({
-						filter: { email: { _eq: email } }
-					});
-					if (usersByEmail.length > 0) {
-						user = usersByEmail[0];
-						matchReason = `email (${email})`;
+					try {
+						let matchedUserId = null;
+						if (database) {
+							const matchedRow = await database('directus_users')
+								.select('id', 'email')
+								.whereRaw('LOWER(email) = LOWER(?)', [email.trim()])
+								.first();
+							if (matchedRow) {
+								matchedUserId = matchedRow.id;
+							}
+						}
+
+						if (!matchedUserId) {
+							const usersByEmail = await usersService.readByQuery({
+								filter: { email: { _icontains: email.trim() } },
+								fields: ['*'],
+								limit: 25
+							});
+							const exactMatch = usersByEmail.find(
+								(u) => u.email && String(u.email).trim().toLowerCase() === email.trim().toLowerCase()
+							);
+							if (exactMatch) {
+								matchedUserId = exactMatch.id;
+							}
+						}
+
+						if (matchedUserId) {
+							user = await usersService.readOne(matchedUserId, { fields: ['*'] });
+							matchReason = `email (${user.email})`;
+						}
+					} catch (emailErr) {
+						logger.error(`⚠️ Error searching user by email: ${emailErr.message}`);
 					}
 				}
 
@@ -932,7 +993,7 @@ export default {
 						newUserPayload.email = email;
 					}
 					const userId = await usersService.createOne(newUserPayload);
-					user = await usersService.readOne(userId);
+					user = await usersService.readOne(userId, { fields: ['*'] });
 				} else {
 					logger.info(`✅ Found existing Directus user by ${matchReason}`);
 
@@ -946,14 +1007,30 @@ export default {
 						logger.info(`📧 Updating Directus user email from '${user.email}' to '${email}'`);
 						updateData.email = email;
 					}
+					// Always sync directus_users.uid to follow keycloak.preferred_username (case & value)
 					if (preferredUsername && user.uid !== preferredUsername) {
 						logger.info(`🆔 Updating Directus user uid from '${user.uid}' to '${preferredUsername}'`);
 						updateData.uid = preferredUsername;
 					}
 
 					if (Object.keys(updateData).length > 0) {
-						await usersService.updateOne(user.id, updateData);
-						Object.assign(user, updateData);
+						try {
+							logger.info(`📝 Updating Directus user (${user.id}) with: ${JSON.stringify(updateData)}`);
+							await usersService.updateOne(user.id, updateData);
+							Object.assign(user, updateData);
+							logger.info(`✅ Successfully updated Directus user (${user.id}) via UsersService`);
+						} catch (updateErr) {
+							logger.warn(`⚠️ UsersService.updateOne failed: ${updateErr.message}, attempting direct database update`);
+							try {
+								if (database) {
+									await database('directus_users').where({ id: user.id }).update(updateData);
+									Object.assign(user, updateData);
+									logger.info(`✅ Successfully updated Directus user (${user.id}) via database fallback`);
+								}
+							} catch (dbErr) {
+								logger.error(`❌ Failed to update user in database: ${dbErr.message}`);
+							}
+						}
 					}
 				}
 
@@ -1016,8 +1093,9 @@ export default {
 						email: user.email || email || '',
 						keycloak_code: keycloakCode
 					};
-					if (user.uid) {
-						redirectParams.uid = user.uid;
+					const finalUid = user.uid || preferredUsername;
+					if (finalUid) {
+						redirectParams.uid = finalUid;
 					}
 
 					const mobileRedirect = `${redirectUrlString}${separator}` + 
@@ -1041,8 +1119,9 @@ export default {
 				redirectUrl.searchParams.set('user_id', user.id);
 				redirectUrl.searchParams.set('email', user.email || email || '');
 				redirectUrl.searchParams.set('keycloak_code', keycloakCode);
-				if (user.uid) {
-					redirectUrl.searchParams.set('uid', user.uid);
+				const finalUid = user.uid || preferredUsername;
+				if (finalUid) {
+					redirectUrl.searchParams.set('uid', finalUid);
 				}
 
 				// Clear the redirect cookie
