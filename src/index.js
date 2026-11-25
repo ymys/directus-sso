@@ -2,8 +2,16 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 import crypto from 'node:crypto';
+import dns from 'node:dns';
 import fs from 'node:fs';
+import net from 'node:net';
 import jwt from 'jsonwebtoken';
+
+// Prevent Node.js 20/22 Happy Eyeballs 250ms timeout from aborting IPv4 handshakes
+// on cross-region Keycloak servers (e.g. GCP Singapore -> Hetzner Finland ~256ms RTT)
+try { dns.setDefaultResultOrder('ipv4first'); } catch (_) {}
+try { net.setDefaultAutoSelectFamily(false); } catch (_) {}
+try { net.setDefaultAutoSelectFamilyAttemptTimeout(5000); } catch (_) {}
 
 export default {
 	id: 'sso',
@@ -89,6 +97,15 @@ export default {
 		const COOKIE_DOMAIN = env.COOKIE_DOMAIN || null;
 		const COOKIE_SECURE = env.COOKIE_SECURE !== 'false';
 		const COOKIE_SAME_SITE = env.COOKIE_SAME_SITE || 'lax';
+
+		// Allowed External Redirect Domains (e.g. "goyong.net,admpipq.goyong.net")
+		const userAllowedDomains = env.ALLOWED_REDIRECT_DOMAINS || env.ALLOWED_DOMAINS || '';
+		const defaultAllowedDomains = ['goyong.net'];
+		const parsedUserDomains = Array.isArray(userAllowedDomains)
+			? userAllowedDomains.map(d => String(d).trim().toLowerCase())
+			: String(userAllowedDomains).split(',').map(d => d.trim().toLowerCase()).filter(Boolean);
+		const ALLOWED_REDIRECT_DOMAINS = Array.from(new Set([...defaultAllowedDomains, ...parsedUserDomains]));
+
 		const SESSION_COOKIE_NAME = env.SESSION_COOKIE_NAME || 'directus_session_token';
 		const REFRESH_TOKEN_COOKIE_NAME = env.REFRESH_TOKEN_COOKIE_NAME || 'directus_refresh_token';
 		const DEFAULT_ROLE_ID = env.DEFAULT_ROLE_ID || null;
@@ -379,7 +396,18 @@ export default {
 					}
 				}
 
-				// 5. Allow localhost, 127.0.0.1, and private IP address ranges
+				// 5. Allowed external domains (e.g. goyong.net)
+				if (ALLOWED_REDIRECT_DOMAINS.length > 0) {
+					const isAllowedDomain = ALLOWED_REDIRECT_DOMAINS.some(domain => {
+						const cleanDomain = domain.replace(/^\./, '');
+						return redirectHost === cleanDomain || redirectHost.endsWith(`.${cleanDomain}`);
+					});
+					if (isAllowedDomain) {
+						return url;
+					}
+				}
+
+				// 6. Allow localhost, 127.0.0.1, and private IP address ranges
 				const isLocalOrPrivate = (host) => {
 					if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
 					// Check for private IPv4 patterns (10.x.x.x, 192.168.x.x, 172.16.x.x - 172.31.x.x)
@@ -408,6 +436,9 @@ export default {
 
 		logger.info('🚀 Mobile Auth Extension loaded');
 		logger.info('📱 Allowed Mobile App Schemes: ' + ALLOWED_SCHEMES.join(', '));
+		if (ALLOWED_REDIRECT_DOMAINS.length > 0) {
+			logger.info('🌐 Allowed Redirect Domains: ' + ALLOWED_REDIRECT_DOMAINS.join(', '));
+		}
 
 		// ==========================================
 		// 2. HELPER FUNCTIONS SSO
@@ -747,7 +778,14 @@ export default {
 
 		// Health check
 		router.get('/health', (req, res) => {
-			res.json({ status: 'ok', service: 'directus-extension-sso', version, allowed_schemes: ALLOWED_SCHEMES, fcm_enabled: !!FCM_PROJECT_ID });
+			res.json({
+				status: 'ok',
+				service: 'directus-extension-sso',
+				version,
+				allowed_schemes: ALLOWED_SCHEMES,
+				allowed_redirect_domains: ALLOWED_REDIRECT_DOMAINS,
+				fcm_enabled: !!FCM_PROJECT_ID
+			});
 		});
 
 		// Server-side redirect helper to reliably return to custom mobile app deep links
